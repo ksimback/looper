@@ -1,0 +1,23 @@
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.coverage
+dist/
+build/
+*.egg-info/
+
+# Local Looper state and generated scratch output.
+.looper-tmp/
+tmp/
+scratch/
+
+# Generated example runs can contain user/project context.
+loop-workspace/
+state.json
+
+# Secrets should never be published.
+.env
+.env.*
+secrets/
+*.key
+

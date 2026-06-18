@@ -1,0 +1,85 @@
+version: 1
+meta:
+  name: ai-workflow-mapping
+  description: Map a manual workflow into a checkable agent design.
+  author: ksimback
+  created: 2026-06-18
+
+goal:
+  statement: >
+    Produce an agent workflow map that converts the current manual process into
+    a stepwise agent design with tool calls, handoffs, and human checkpoints.
+  context_sources:
+    - file: ./inputs/process-notes.md
+  definition_of_done: >
+    LOOP.md and a diagram exist, every step has a tool, model, or human owner,
+    and no step is left as TBD.
+  verification:
+    - id: required-sections
+      type: programmatic
+      check: ["python", "scripts/check-loop-doc.py", "loop-workspace/delivery-1.md"]
+      expect: exit_zero
+    - id: covers-goal
+      type: judge
+      rubric: >
+        Every part of the goal statement is addressed; each workflow step has
+        an owner; no step depends on information the loop never gathers.
+    - id: user-signoff
+      type: human
+      prompt: "Confirm the workflow map matches the real process."
+
+host:
+  cli: codex
+  model: gpt-5
+  invoke: ["codex", "exec", "--model", "gpt-5"]
+  timeout_sec: 600
+
+council:
+  - id: reviewer-1
+    role: judge
+    cli: claude
+    model: default
+    invoke: ["claude", "-p"]
+    timeout_sec: 600
+    scope: [plan, delivery]
+    local: false
+
+gates:
+  plan_gate:
+    when: after_plan
+    members: [reviewer-1]
+    verdict_policy: revise_until_clean
+    verdict_source: reviewer-1
+    criteria: [covers-goal]
+    max_revisions: 3
+  delivery_gate:
+    when: after_each_delivery
+    members: [reviewer-1]
+    verdict_policy: revise_until_clean
+    verdict_source: reviewer-1
+    criteria: [required-sections, covers-goal]
+    max_revisions: 3
+
+loop_control:
+  max_iterations: 12
+  budget:
+    usd: 5.0
+    tokens: 2000000
+    wall_clock_min: 30
+  human_checkpoints: []
+  stop_conditions:
+    - all deliveries pass their gate clean
+    - max_iterations reached
+    - any budget cap exceeded
+
+privacy:
+  egress:
+    - to: reviewer-1
+      sends: [plan, deliveries]
+      redact: [".env", ".env.*", "secrets/**", "**/*.key"]
+      consent: required
+
+workspace:
+  dir: ./loop-workspace
+  layout: [plan.md, "delivery-{n}.md", "review-{n}.md", state.json]
+

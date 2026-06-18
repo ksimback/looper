@@ -1,0 +1,7 @@
+interface:
+  display_name: "Looper"
+  short_description: "Design and scaffold agent loops"
+  default_prompt: "Use $looper to design a checkable agent loop with a reviewer or judge gate."
+policy:
+  allow_implicit_invocation: false
+

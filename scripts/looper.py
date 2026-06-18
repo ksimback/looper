@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""Looper helper CLI.
+
+This script belongs to the scaffolding side of Looper. It may detect installed
+CLIs, register invocation metadata, compile loop.yaml to loop.resolved.json, and
+render LOOP.md. It must not invoke model CLIs to do loop work.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import sys
+from typing import Any
+
+
+DEFAULT_REDACTIONS = [".env", ".env.*", "secrets/**", "**/*.key"]
+REGISTRY_PATH = Path.home() / ".looper" / "models.json"
+
+MODEL_PROBES: dict[str, dict[str, Any]] = {
+    "claude": {
+        "invoke": ["claude", "-p"],
+        "probe": ["claude", "--version"],
+        "local": False,
+        "install": "Install and authenticate the Claude CLI.",
+    },
+    "codex": {
+        "invoke": ["codex", "exec"],
+        "probe": ["codex", "--version"],
+        "local": False,
+        "install": "Install and authenticate the Codex CLI.",
+    },
+    "gemini": {
+        "invoke": ["gemini", "-p"],
+        "probe": ["gemini", "--version"],
+        "local": False,
+        "install": "Install and authenticate the Gemini CLI.",
+    },
+    "llm": {
+        "invoke": ["llm"],
+        "probe": ["llm", "--version"],
+        "local": False,
+        "install": "Install llm and configure a model/provider.",
+    },
+    "ollama": {
+        "invoke": ["ollama", "run"],
+        "probe": ["ollama", "--version"],
+        "local": True,
+        "install": "Install Ollama and pull a local model.",
+    },
+}
+
+
+class LooperError(RuntimeError):
+    pass
+
+
+def load_yaml(path: Path) -> dict[str, Any]:
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise LooperError(
+            "PyYAML is required to compile loop.yaml. Install with: python -m pip install PyYAML"
+        ) from exc
+
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except yaml.YAMLError as exc:
+        raise LooperError(f"Could not parse YAML in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise LooperError(f"{path} must contain a YAML mapping at the top level")
+    return data
+
+
+def write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(to_jsonable(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def to_jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [to_jsonable(item) for item in value]
+    if isinstance(value, (_dt.date, _dt.datetime)):
+        return value.isoformat()
+    return value
+
+
+def read_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise LooperError(f"Registry {path} must contain a JSON object")
+    return data
+
+
+def write_registry(data: dict[str, Any], path: Path = REGISTRY_PATH) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_json(path, data)
+
+
+def run_probe(argv: list[str], timeout_sec: int = 5) -> tuple[bool, str]:
+    probe_argv = list(argv)
+    if os.name == "nt":
+        resolved = shutil.which(argv[0])
+        if resolved and Path(resolved).suffix.lower() in {".cmd", ".bat"}:
+            probe_argv = ["cmd", "/d", "/c", *argv]
+    try:
+        completed = subprocess.run(
+            probe_argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+
+    output = (completed.stdout or completed.stderr or "").strip()
+    return completed.returncode == 0, output.splitlines()[0] if output else ""
+
+
+def detect_models() -> dict[str, Any]:
+    registry: dict[str, Any] = {}
+    for model_id, meta in MODEL_PROBES.items():
+        cli = meta["invoke"][0]
+        path = shutil.which(cli)
+        available = path is not None
+        authed = False
+        version = ""
+        if available:
+            authed, version = run_probe(meta["probe"])
+        registry[model_id] = {
+            "cli": cli,
+            "path": path,
+            "invoke": meta["invoke"],
+            "available": available,
+            "authed": authed,
+            "local": meta["local"],
+            "probe": meta["probe"],
+            "version": version,
+            "install": meta["install"],
+        }
+    return registry
+
+
+def normalize_argv(value: Any, field: str) -> list[str]:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    if isinstance(value, str):
+        return shlex.split(value, posix=os.name != "nt")
+    raise LooperError(f"{field} must be an argv array or string")
+
+
+def criteria_by_id(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    criteria = spec.get("goal", {}).get("verification", [])
+    if not isinstance(criteria, list):
+        raise LooperError("goal.verification must be a list")
+    result: dict[str, dict[str, Any]] = {}
+    for item in criteria:
+        if not isinstance(item, dict):
+            raise LooperError("Each verification criterion must be an object")
+        cid = item.get("id")
+        ctype = item.get("type")
+        if not isinstance(cid, str) or not cid:
+            raise LooperError("Each verification criterion needs a non-empty id")
+        if cid in result:
+            raise LooperError(f"Duplicate verification criterion id: {cid}")
+        if ctype not in {"programmatic", "judge", "human"}:
+            raise LooperError(f"Criterion {cid} has invalid type: {ctype}")
+        if ctype == "programmatic":
+            item["check"] = normalize_argv(item.get("check"), f"criterion {cid}.check")
+            if item.get("expect") not in {"exit_zero", "exit_nonzero", "stdout_contains"}:
+                raise LooperError(
+                    f"Criterion {cid}.expect must be exit_zero, exit_nonzero, or stdout_contains"
+                )
+            if item.get("expect") == "stdout_contains" and not isinstance(item.get("contains"), str):
+                raise LooperError(f"Criterion {cid} with stdout_contains needs contains")
+        elif ctype == "judge" and not isinstance(item.get("rubric"), str):
+            raise LooperError(f"Criterion {cid} needs a judge rubric")
+        elif ctype == "human" and not isinstance(item.get("prompt"), str):
+            raise LooperError(f"Criterion {cid} needs a human prompt")
+        result[cid] = item
+    return result
+
+
+def validate_member(member: dict[str, Any]) -> None:
+    mid = member.get("id")
+    role = member.get("role")
+    if not isinstance(mid, str) or not mid:
+        raise LooperError("Each council member needs a non-empty id")
+    if role not in {"reviewer", "judge"}:
+        raise LooperError(f"Council member {mid} role must be reviewer or judge")
+    member["invoke"] = normalize_argv(member.get("invoke"), f"council.{mid}.invoke")
+    timeout = member.get("timeout_sec", 600)
+    if not isinstance(timeout, int) or timeout <= 0:
+        raise LooperError(f"Council member {mid}.timeout_sec must be a positive integer")
+    member.setdefault("scope", ["plan", "delivery"])
+    member.setdefault("local", member.get("cli") == "ollama")
+
+
+def validate_gate(
+    name: str,
+    gate: dict[str, Any],
+    criteria: dict[str, dict[str, Any]],
+    members: dict[str, dict[str, Any]],
+) -> None:
+    if not isinstance(gate, dict):
+        raise LooperError(f"{name} must be an object")
+    policy = gate.get("verdict_policy")
+    if policy not in {"revise_until_clean", "fixed_passes"}:
+        raise LooperError(f"{name}.verdict_policy must be revise_until_clean or fixed_passes")
+    max_revisions = gate.get("max_revisions", 1)
+    if not isinstance(max_revisions, int) or max_revisions < 0:
+        raise LooperError(f"{name}.max_revisions must be a non-negative integer")
+    for cid in gate.get("criteria", []):
+        if cid not in criteria:
+            raise LooperError(f"{name} references unknown criterion: {cid}")
+    for mid in gate.get("members", []):
+        if mid not in members:
+            raise LooperError(f"{name} references unknown council member: {mid}")
+    if policy == "revise_until_clean":
+        source = gate.get("verdict_source")
+        if source == "human":
+            return
+        if source not in members:
+            raise LooperError(f"{name}.verdict_source must be a judge member or human")
+        if members[source].get("role") != "judge":
+            raise LooperError(f"{name}.verdict_source must name a judge, not a reviewer")
+
+
+def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
+    if spec.get("version") != 1:
+        raise LooperError("Only loop.yaml version: 1 is supported")
+
+    goal = spec.get("goal")
+    if not isinstance(goal, dict):
+        raise LooperError("goal must be an object")
+    if not isinstance(goal.get("statement"), str) or not goal["statement"].strip():
+        raise LooperError("goal.statement is required")
+    if not isinstance(goal.get("definition_of_done"), str) or not goal["definition_of_done"].strip():
+        raise LooperError("goal.definition_of_done is required")
+
+    for index, source in enumerate(goal.get("context_sources", [])):
+        if not isinstance(source, dict):
+            raise LooperError("goal.context_sources entries must be objects")
+        if "cmd" in source:
+            source["cmd"] = normalize_argv(source["cmd"], f"context_sources[{index}].cmd")
+
+    criteria = criteria_by_id(spec)
+
+    host = spec.get("host")
+    if not isinstance(host, dict):
+        raise LooperError("host must be an object")
+    host["invoke"] = normalize_argv(host.get("invoke"), "host.invoke")
+    host.setdefault("timeout_sec", 600)
+    if not isinstance(host["timeout_sec"], int) or host["timeout_sec"] <= 0:
+        raise LooperError("host.timeout_sec must be a positive integer")
+
+    council_list = spec.get("council", [])
+    if not isinstance(council_list, list):
+        raise LooperError("council must be a list")
+    for member in council_list:
+        if not isinstance(member, dict):
+            raise LooperError("council entries must be objects")
+        validate_member(member)
+    members = {member["id"]: member for member in council_list}
+
+    gates = spec.get("gates")
+    if not isinstance(gates, dict):
+        raise LooperError("gates must be an object")
+    for gate_name in ("plan_gate", "delivery_gate"):
+        validate_gate(gate_name, gates.get(gate_name), criteria, members)
+
+    control = spec.get("loop_control")
+    if not isinstance(control, dict):
+        raise LooperError("loop_control must be an object")
+    max_iterations = control.get("max_iterations")
+    if not isinstance(max_iterations, int) or max_iterations <= 0:
+        raise LooperError("loop_control.max_iterations must be a positive integer")
+    budget = control.setdefault("budget", {})
+    if not isinstance(budget, dict):
+        raise LooperError("loop_control.budget must be an object")
+    if "wall_clock_min" not in budget:
+        budget["wall_clock_min"] = 30
+
+    workspace = spec.setdefault("workspace", {})
+    if not isinstance(workspace, dict):
+        raise LooperError("workspace must be an object")
+    workspace.setdefault("dir", "./loop-workspace")
+    workspace.setdefault("layout", ["plan.md", "delivery-{n}.md", "review-{n}.md", "state.json"])
+
+    privacy = spec.setdefault("privacy", {})
+    if not isinstance(privacy, dict):
+        raise LooperError("privacy must be an object")
+    egress = privacy.setdefault("egress", [])
+    if not isinstance(egress, list):
+        raise LooperError("privacy.egress must be a list")
+    for entry in egress:
+        if not isinstance(entry, dict):
+            raise LooperError("privacy.egress entries must be objects")
+        entry.setdefault("redact", DEFAULT_REDACTIONS)
+        entry.setdefault("consent", "required")
+
+    resolved = {
+        "$schema": "https://github.com/ksimback/looper/schema/loop.resolved.v1.json",
+        "compiled_at": _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
+        "source": str(source_path),
+        **spec,
+        "criteria_by_id": criteria,
+        "council_by_id": members,
+    }
+    return to_jsonable(resolved)
+
+
+def render_loop(resolved: dict[str, Any]) -> str:
+    meta = resolved.get("meta", {})
+    goal = resolved.get("goal", {})
+    gates = resolved.get("gates", {})
+    control = resolved.get("loop_control", {})
+    title = meta.get("name") or "Looper Generated Loop"
+    criteria = goal.get("verification", [])
+    council = resolved.get("council", [])
+
+    lines = [
+        f"# {title}",
+        "",
+        meta.get("description", "").strip(),
+        "",
+        "## Goal",
+        "",
+        goal.get("statement", "").strip(),
+        "",
+        "## Definition of Done",
+        "",
+        goal.get("definition_of_done", "").strip(),
+        "",
+        "## Verification",
+        "",
+    ]
+    for item in criteria:
+        lines.append(f"- `{item['id']}` ({item['type']})")
+    lines.extend(["", "## Council", ""])
+    if council:
+        for member in council:
+            lines.append(
+                f"- `{member['id']}`: {member.get('role')} via {member.get('cli')} "
+                f"({member.get('model', 'default')})"
+            )
+    else:
+        lines.append("- No council members configured.")
+    lines.extend(
+        [
+            "",
+            "## Gates",
+            "",
+            f"- Plan gate: {gates.get('plan_gate', {}).get('verdict_policy')}",
+            f"- Delivery gate: {gates.get('delivery_gate', {}).get('verdict_policy')}",
+            "",
+            "## Loop Control",
+            "",
+            f"- Max iterations: {control.get('max_iterations')}",
+            f"- Budget: `{json.dumps(control.get('budget', {}), sort_keys=True)}`",
+            "",
+            "## Diagram",
+            "",
+            "```mermaid",
+            "flowchart TD",
+            '  A["Goal and context"] --> B["Host drafts plan.md"]',
+            '  B --> C{"Plan gate"}',
+            '  C -- revise --> B',
+            '  C -- clean --> D["Host writes delivery-N.md"]',
+            '  D --> E{"Delivery gate"}',
+            '  E -- revise --> D',
+            '  E -- clean --> F["Final output"]',
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(line for line in lines if line is not None)
+
+
+def cmd_detect(args: argparse.Namespace) -> int:
+    registry = detect_models()
+    if args.write:
+        existing = read_registry(args.registry)
+        existing.update(registry)
+        write_registry(existing, args.registry)
+    print(json.dumps(registry, indent=2, sort_keys=True))
+    return 0
+
+
+def cmd_register(args: argparse.Namespace) -> int:
+    if not args.invoke:
+        raise LooperError("--invoke needs at least one command token")
+    registry = read_registry(args.registry)
+    registry[args.model_id] = {
+        "cli": args.invoke[0],
+        "invoke": args.invoke,
+        "available": shutil.which(args.invoke[0]) is not None,
+        "authed": args.authed,
+        "local": args.local,
+        "model": args.model,
+        "notes": args.notes or "",
+    }
+    write_registry(registry, args.registry)
+    print(f"Registered {args.model_id} in {args.registry}")
+    return 0
+
+
+def cmd_compile(args: argparse.Namespace) -> int:
+    source = args.loop_yaml.resolve()
+    spec = load_yaml(source)
+    resolved = normalize_spec(spec, source)
+    out = args.out or source.with_name("loop.resolved.json")
+    write_json(out, resolved)
+    if args.render:
+        args.render.parent.mkdir(parents=True, exist_ok=True)
+        args.render.write_text(render_loop(resolved), encoding="utf-8")
+    print(f"Wrote {out}")
+    if args.render:
+        print(f"Wrote {args.render}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="looper", description="Looper scaffolding helpers")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    detect = sub.add_parser("detect-models", help="Detect model CLIs and print registry JSON")
+    detect.add_argument("--write", action="store_true", help="Merge results into the model registry")
+    detect.add_argument("--registry", type=Path, default=REGISTRY_PATH)
+    detect.set_defaults(func=cmd_detect)
+
+    register = sub.add_parser("register-model", help="Register custom model CLI invocation metadata")
+    register.add_argument("model_id")
+    register.add_argument("--invoke", nargs="+", required=True)
+    register.add_argument("--model", default="")
+    register.add_argument("--local", action="store_true")
+    register.add_argument("--authed", action="store_true")
+    register.add_argument("--notes", default="")
+    register.add_argument("--registry", type=Path, default=REGISTRY_PATH)
+    register.set_defaults(func=cmd_register)
+
+    compile_cmd = sub.add_parser("compile", help="Compile loop.yaml to loop.resolved.json")
+    compile_cmd.add_argument("loop_yaml", type=Path)
+    compile_cmd.add_argument("--out", type=Path)
+    compile_cmd.add_argument("--render", type=Path)
+    compile_cmd.set_defaults(func=cmd_compile)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return int(args.func(args))
+    except LooperError as exc:
+        print(f"looper: error: {exc}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

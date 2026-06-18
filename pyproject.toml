@@ -1,0 +1,14 @@
+[project]
+name = "looper-skill"
+version = "0.1.0"
+description = "A Claude Code skill that scaffolds well-designed agent loops."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [{ name = "Kevin Simback" }]
+dependencies = ["PyYAML>=6.0"]
+
+[tool.looper]
+skill_root = "."
+runner_template = "templates/run-loop.py"
+
