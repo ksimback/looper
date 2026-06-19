@@ -13,6 +13,7 @@ scratch/
 ~/
 
 # Generated example runs can contain user/project context.
+looper-output/
 loop-workspace/
 state.json
 
