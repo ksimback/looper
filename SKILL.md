@@ -7,7 +7,8 @@ description: >
   loop, multi-model council, reviewer/judge gate, or /goal-style looping
   process. Guide goal refinement, typed verification criteria, reviewer and
   judge selection, privacy boundaries, and termination guards, then emit a
-  portable loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
+  RUN_IN_SESSION.md handoff prompt plus portable loop.yaml, loop.resolved.json,
+  LOOP.md, and run-loop.py.
 disable-model-invocation: true
 argument-hint: "[target-dir]"
 allowed-tools: Write Bash(python3 *)
@@ -15,9 +16,10 @@ allowed-tools: Write Bash(python3 *)
 
 # Looper
 
-Use Looper as a loop design coach and scaffolder. Do not run loop work from
-this skill process. The skill interviews, critiques, validates, and writes
-files. The emitted `run-loop.py` is the only artifact that executes a loop.
+Use Looper as a loop design coach and scaffolder. During design, interview,
+critique, validate, and write files. After emission, offer to run the loop in
+the current session using `RUN_IN_SESSION.md`; keep `run-loop.py` as the
+advanced external runner.
 
 ## Workflow
 
@@ -31,7 +33,7 @@ files. The emitted `run-loop.py` is the only artifact that executes a loop.
    - Control stage: `references/control-rubric.md`.
    - Model detection or privacy details: `references/model-detection.md`.
 3. Interview in seven stages: goal, verification, host model, council,
-   gates/control, confirmation diagram, emit.
+   gates/control, confirmation diagram, emit/run option.
 4. Critique each stage before accepting it. Prefer concrete alternatives over
    vague warnings. Push weak goals toward outcome, scope, context, and done
    state. Push weak verification toward programmatic checks first, then judge
@@ -44,19 +46,24 @@ files. The emitted `run-loop.py` is the only artifact that executes a loop.
    guards.
 7. Before any cross-vendor council member is selected, state what context will
    leave the user's machine, which CLI receives it, which redaction globs apply,
-   and that the emitted runner will ask for first-send consent.
+   and that both execution paths require first-send consent.
 8. Show a Mermaid diagram of the planned loop and ask for confirmation before
    final emission.
 9. Emit these files into the target:
    - `loop.yaml`
    - `loop.resolved.json`
    - `LOOP.md`
+   - `RUN_IN_SESSION.md`
    - `run-loop.py`
    - `loop-workspace/`
    - `README.md`
 10. After writing `loop.yaml`, run:
-   `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md`
+   `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
    If `python3` is not available, try `python`.
+11. Ask whether the user wants to run the loop now in this session. If yes,
+   follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
+   the same file is the easy restart path and `run-loop.py` is available for
+   advanced external execution.
 
 ## File Rules
 
@@ -67,8 +74,10 @@ files. The emitted `run-loop.py` is the only artifact that executes a loop.
 - Default redaction globs are `.env`, `.env.*`, `secrets/**`, and `**/*.key`.
 - Keep `loop.yaml` human-readable and commented where useful. The emitted
   runner reads only `loop.resolved.json`.
+- Keep `RUN_IN_SESSION.md` as the default/easy execution handoff. It is meant
+  for the current LLM session or a future pasted prompt.
 - Copy `templates/run-loop.py` exactly unless the user explicitly asks to edit
-  the runner contract.
+  the external runner contract.
 
 ## Helper Scripts
 
@@ -77,7 +86,9 @@ files. The emitted `run-loop.py` is the only artifact that executes a loop.
 - Register a custom CLI:
   `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke <cmd> [args...]`
 - Compile and render:
-  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md`
+  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+- Render only the in-session handoff:
+  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
 
 ## Confirmation Diagram
 
@@ -104,5 +115,5 @@ flowchart TD
 - Every external invocation is an argv array with a timeout.
 - Cross-vendor egress is scoped, redacted, and consent-gated.
 - `loop_control` has iteration, revision, and wall-clock or budget caps.
-- `loop.resolved.json` compiles successfully before handoff.
-
+- `loop.resolved.json`, `LOOP.md`, and `RUN_IN_SESSION.md` compile
+  successfully before handoff.

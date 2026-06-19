@@ -79,6 +79,14 @@ def load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def load_json(path: Path) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise LooperError(f"{path} must contain a JSON object")
+    return data
+
+
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(to_jsonable(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -392,6 +400,141 @@ def render_loop(resolved: dict[str, Any]) -> str:
     return "\n".join(line for line in lines if line is not None)
 
 
+def render_session_prompt(resolved: dict[str, Any]) -> str:
+    meta = resolved.get("meta", {})
+    goal = resolved.get("goal", {})
+    gates = resolved.get("gates", {})
+    control = resolved.get("loop_control", {})
+    workspace = resolved.get("workspace", {})
+    criteria = goal.get("verification", [])
+    council = resolved.get("council", [])
+    title = meta.get("name") or "Looper Generated Loop"
+
+    lines = [
+        f"# Run `{title}` In This Session",
+        "",
+        "Use this prompt when the user wants to run the Looper-designed loop in the current LLM session.",
+        "This is the default/easy execution path. The Python runner is the advanced path for running later or outside the session.",
+        "",
+        "## Operator Instructions",
+        "",
+        "You are executing a Looper-designed loop in this current session.",
+        "Follow the resolved spec below, write handoff files into the workspace, and enforce the caps manually.",
+        "Do not use `run-loop.py` unless the user explicitly asks for the advanced external runner.",
+        "",
+        "1. Create the workspace directory if it does not exist.",
+        "2. Read the context sources before drafting the plan.",
+        "3. Draft `plan.md` in the workspace.",
+        "4. Run the plan gate. Apply programmatic checks when available. For judge criteria, use the configured judge only after consent for any non-local egress; otherwise ask the user to approve a human/current-session substitute.",
+        "5. Revise until the gate passes or `max_revisions` is reached.",
+        "6. Produce `delivery-N.md` in the workspace.",
+        "7. Run the delivery gate after each delivery.",
+        "8. Stop when all delivery criteria pass, a cap is reached, or the user stops the loop.",
+        "9. Keep `state.json` current with status, iteration, last gate, and any blockers.",
+        "",
+        "## Files",
+        "",
+        f"- Source spec: `{Path(resolved.get('source', 'loop.yaml')).name}`",
+        "- Human summary: `LOOP.md`",
+        "- Resolved spec: `loop.resolved.json`",
+        f"- Workspace: `{workspace.get('dir', './loop-workspace')}`",
+        "",
+        "## Goal",
+        "",
+        goal.get("statement", "").strip(),
+        "",
+        "## Definition Of Done",
+        "",
+        goal.get("definition_of_done", "").strip(),
+        "",
+        "## Context Sources",
+        "",
+    ]
+
+    context_sources = goal.get("context_sources", [])
+    if context_sources:
+        for source in context_sources:
+            if "file" in source:
+                lines.append(f"- Read file `{source['file']}`")
+            elif "cmd" in source:
+                lines.append(f"- Run command `{json.dumps(source['cmd'])}`")
+    else:
+        lines.append("- No context sources configured.")
+
+    lines.extend(["", "## Verification Criteria", ""])
+    for item in criteria:
+        if item["type"] == "programmatic":
+            lines.append(
+                f"- `{item['id']}` programmatic: run `{json.dumps(item['check'])}` and expect `{item['expect']}`"
+            )
+        elif item["type"] == "judge":
+            lines.append(f"- `{item['id']}` judge rubric: {item['rubric']}")
+        elif item["type"] == "human":
+            lines.append(f"- `{item['id']}` human signoff: {item['prompt']}")
+
+    lines.extend(["", "## Council", ""])
+    if council:
+        for member in council:
+            locality = "local" if member.get("local") else "non-local"
+            lines.append(
+                f"- `{member['id']}` {member.get('role')} via `{json.dumps(member.get('invoke', []))}` "
+                f"({locality}; timeout {member.get('timeout_sec', 600)}s)"
+            )
+    else:
+        lines.append("- No council members configured.")
+
+    lines.extend(["", "## Gates", ""])
+    for gate_name in ("plan_gate", "delivery_gate"):
+        gate = gates.get(gate_name, {})
+        lines.extend(
+            [
+                f"### {gate_name}",
+                "",
+                f"- When: `{gate.get('when')}`",
+                f"- Policy: `{gate.get('verdict_policy')}`",
+                f"- Verdict source: `{gate.get('verdict_source', 'none')}`",
+                f"- Criteria: `{', '.join(gate.get('criteria', []))}`",
+                f"- Max revisions: `{gate.get('max_revisions')}`",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "## Loop Control",
+            "",
+            f"- Max iterations: `{control.get('max_iterations')}`",
+            f"- Budget: `{json.dumps(control.get('budget', {}), sort_keys=True)}`",
+            f"- Human checkpoints: `{', '.join(control.get('human_checkpoints', [])) or 'none'}`",
+            "- Stop conditions:",
+        ]
+    )
+    for condition in control.get("stop_conditions", []):
+        lines.append(f"  - {condition}")
+
+    lines.extend(["", "## Privacy", ""])
+    egress = resolved.get("privacy", {}).get("egress", [])
+    if egress:
+        for entry in egress:
+            lines.append(
+                f"- Before sending `{', '.join(entry.get('sends', []))}` to `{entry.get('to')}`, "
+                f"confirm consent and apply redactions `{', '.join(entry.get('redact', []))}`."
+            )
+    else:
+        lines.append("- No cross-vendor egress configured.")
+
+    lines.extend(
+        [
+            "",
+            "## Start Now",
+            "",
+            "If the user asked to run now, begin at step 1 under Operator Instructions and keep going until a stop condition is reached.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def cmd_detect(args: argparse.Namespace) -> int:
     registry = detect_models()
     if args.write:
@@ -429,9 +572,26 @@ def cmd_compile(args: argparse.Namespace) -> int:
     if args.render:
         args.render.parent.mkdir(parents=True, exist_ok=True)
         args.render.write_text(render_loop(resolved), encoding="utf-8")
+    if args.session_prompt:
+        args.session_prompt.parent.mkdir(parents=True, exist_ok=True)
+        args.session_prompt.write_text(render_session_prompt(resolved), encoding="utf-8")
     print(f"Wrote {out}")
     if args.render:
         print(f"Wrote {args.render}")
+    if args.session_prompt:
+        print(f"Wrote {args.session_prompt}")
+    return 0
+
+
+def cmd_session_prompt(args: argparse.Namespace) -> int:
+    resolved = load_json(args.resolved_json)
+    prompt = render_session_prompt(resolved)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(prompt, encoding="utf-8")
+        print(f"Wrote {args.out}")
+    else:
+        print(prompt)
     return 0
 
 
@@ -458,7 +618,15 @@ def build_parser() -> argparse.ArgumentParser:
     compile_cmd.add_argument("loop_yaml", type=Path)
     compile_cmd.add_argument("--out", type=Path)
     compile_cmd.add_argument("--render", type=Path)
+    compile_cmd.add_argument("--session-prompt", type=Path)
     compile_cmd.set_defaults(func=cmd_compile)
+
+    session_prompt = sub.add_parser(
+        "session-prompt", help="Render the in-session execution prompt from loop.resolved.json"
+    )
+    session_prompt.add_argument("resolved_json", type=Path)
+    session_prompt.add_argument("--out", type=Path)
+    session_prompt.set_defaults(func=cmd_session_prompt)
 
     return parser
 

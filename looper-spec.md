@@ -1,33 +1,34 @@
-# Looper — Design Spec (v0.2)
+# Looper — Design Spec (v0.3)
 
 *An open-source Claude Code skill that scaffolds well-designed agent loops.*
 
 Author: Kevin Simback ([@ksimback](https://x.com/ksimback) · github.com/ksimback)
-Status: draft v0.2 · License target: MIT
-Changes since v0.1: crisp scaffolder/runtime boundary; single resolved-spec + Python runner (dropped dual-shell + shell-YAML parsing); typed verification criteria; structured judge output; reviewer-only gate rule; argv/timeout/secret hardening; new privacy/security section; Claude Code frontmatter; revised build order.
+Status: draft v0.3 · License target: MIT
+Changes since v0.2: in-session execution handoff is now the default run path; Python runner remains the advanced external runner; `RUN_IN_SESSION.md` is generated from the resolved spec.
 
 ---
 
 ## 1. What it is
 
-`Looper` is a Claude Code skill, invoked with `/looper`, that walks an agentic engineer through designing a multi-step agent loop — and **coaches them toward a good one** as they go. It interviews the user, critiques their goal and verification design against built-in best-practice rubrics, lets them wire in a cross-model reviewer/judge, renders the loop visually for confirmation, then **emits a portable loop spec plus the files needed to run it**.
+`Looper` is a Claude Code skill, invoked with `/looper`, that walks an agentic engineer through designing a multi-step agent loop — and **coaches them toward a good one** as they go. It interviews the user, critiques their goal and verification design against built-in best-practice rubrics, lets them wire in a cross-model reviewer/judge, renders the loop visually for confirmation, then **emits an in-session run prompt plus a portable loop spec and external runner**.
 
-The wedge is **design discipline + a cross-model council**, at the layer *before* execution. Claude Code already ships `/goal` (a persistent objective the model self-checks) and `/loop` (an interval scheduler). Neither helps you design a *good* loop, force a checkable definition of done, or get a second, different model's eyes — which is exactly where loops fail. Looper fills that gap and produces an artifact the existing tools can run. See the README's comparison section.
+The wedge is **design discipline + a cross-model council**, at the layer *before* execution. Claude Code already ships `/goal` (a persistent objective the model self-checks) and `/loop` (an interval scheduler). Neither helps you design a *good* loop, force a checkable definition of done, or get a second, different model's eyes — which is exactly where loops fail. Looper fills that gap and produces artifacts the current session, existing tools, or an external runner can follow. See the README's comparison section.
 
 ---
 
 ## 2. The scaffolder/runtime boundary (read this first)
 
-Looper is a **scaffolder, not a runtime**, and the boundary is a hard rule, not a vibe:
+Looper is a **scaffolder and session handoff, not an orchestration framework**, and the boundary is a hard rule, not a vibe:
 
 > **Looper's own process never invokes a model to do loop work. It only reads input, coaches, and writes files.**
 
-Everything that *runs* the loop lives in an emitted artifact — `run-loop.py` — that the user executes in their own environment. That runner has a tiny, fixed contract (§7) and makes no design decisions: every choice is already baked into the resolved spec. This is what keeps Looper from drifting into being an orchestration framework by accident.
+The default "run now" path is `RUN_IN_SESSION.md`: a structured prompt/handoff that the current Claude Code session can follow immediately after design. The advanced external path is `run-loop.py`, which the user executes in their own environment. Both are generated from the resolved spec and make no design decisions: every choice is already baked into the loop artifacts. This keeps Looper from drifting into being a hidden orchestration framework by accident.
 
 | Layer | Who | What |
 | :-- | :-- | :-- |
 | Design | Looper (`/looper`) | interview, coach, validate, emit |
-| Execution | emitted `run-loop.py` | parse resolved spec → invoke CLIs → read/write known files → enforce caps → stop |
+| Immediate execution | current Claude Code session + `RUN_IN_SESSION.md` | follow the resolved loop, write known files, honor gates and caps |
+| External execution | emitted `run-loop.py` | parse resolved spec → invoke CLIs → read/write known files → enforce caps → stop |
 
 ---
 
@@ -37,14 +38,14 @@ Everything that *runs* the loop lives in an emitted artifact — `run-loop.py` �
 2. **Coaching over collection.** The wizard's value is the critique it returns at each stage, driven by the rubrics (§5).
 3. **Model-agnostic council.** The reviewer/judge can be any installed CLI model, chosen in the wizard. Cross-model is the recommended default.
 4. **File-based handoff.** Emitted loops pass state through a shared workspace of files; no fragile context piping.
-5. **One execution artifact, one format.** Author in YAML; execute from a normalized `loop.resolved.json` via a single Python runner. No shell-parsing of YAML.
+5. **Two execution surfaces, one resolved spec.** Author in YAML; generate `RUN_IN_SESSION.md` for easy in-session execution and `run-loop.py` for advanced external execution from the normalized `loop.resolved.json`. No shell-parsing of YAML.
 6. **Safe by construction.** argv arrays not shell strings; timeouts on every external call; no secrets stored by Looper; explicit consent before any cross-vendor context egress.
 
 ---
 
 ## 4. The Loop Spec (the core IP)
 
-Authoring format is YAML (`loop.yaml`) — human-friendly, comment-friendly. Looper compiles it to a normalized, validated `loop.resolved.json` (refs expanded, model invocations resolved to argv arrays, rubrics inlined). **The runner only ever reads `loop.resolved.json`.**
+Authoring format is YAML (`loop.yaml`) — human-friendly, comment-friendly. Looper compiles it to a normalized, validated `loop.resolved.json` (refs expanded, model invocations resolved to argv arrays, rubrics inlined). `RUN_IN_SESSION.md` is rendered from that resolved spec. **The external runner only ever reads `loop.resolved.json`.**
 
 ```yaml
 version: 1
@@ -190,13 +191,30 @@ On install / first run, `detect-models` probes `PATH` and known locations for a 
 
 `models.json` stores **invocation metadata only — never API keys or secrets.** Auth stays in each CLI's own config/keychain. In the wizard's host and council stages, Looper offers detected, authed models as choices; for anything missing it prints the install/auth command and offers to re-probe. Unknown CLIs are added via `looper register-model` or by hand-editing the registry.
 
-At compile time, Looper resolves each chosen model's `invoke` into the spec as an argv array. The emitted runner shells out with argv (no string interpolation) and a per-call `timeout_sec`. This is the "codex → claude / claude → codex" bridge from the source post, captured as generated config rather than hand-written.
+At compile time, Looper resolves each chosen model's `invoke` into the spec as an argv array. The in-session prompt tells the current session exactly which argv array is configured and when consent is needed; the emitted runner shells out with argv (no string interpolation) and a per-call `timeout_sec`. This is the "codex → claude / claude → codex" bridge from the source post, captured as generated config rather than hand-written.
 
 ---
 
-## 7. The emitted runner contract
+## 7. Execution contracts
 
-`run-loop.py` is the only thing that executes, and its contract is fixed and small:
+### Default: in-session handoff
+
+`RUN_IN_SESSION.md` is the easy path. It is a prompt the current Claude Code session can follow immediately after `/looper` finishes designing the loop:
+
+1. Read `loop.resolved.json` / `LOOP.md` and the listed context sources.
+2. Draft `plan.md`.
+3. Run the plan gate, including programmatic checks and judge/human criteria.
+4. Revise up to `max_revisions`.
+5. Write `delivery-N.md`.
+6. Run the delivery gate.
+7. Keep `state.json` current.
+8. Stop on pass, cap breach, or user stop.
+
+This path is easy and conversational, but caps are enforced by the current agent following instructions, not by a separate process.
+
+### Advanced: external Python runner
+
+`run-loop.py` is the strict external runner, and its contract is fixed and small:
 
 1. Load and validate `loop.resolved.json`.
 2. Gather `context_sources` into the workspace.
@@ -217,12 +235,13 @@ The runner never decides *what* to do — only executes the resolved spec. Singl
 ├── loop.yaml             # human-authored source
 ├── loop.resolved.json    # compiled, validated; the runner reads this
 ├── LOOP.md               # human-readable rendering + diagram
-├── run-loop.py           # the thin runner (contract above)
+├── RUN_IN_SESSION.md     # default handoff prompt for current-session execution
+├── run-loop.py           # advanced external runner (contract above)
 ├── loop-workspace/       # empty handoff dir with the file layout
 └── README.md             # how to run; attribution
 ```
 
-Cross-platform note: a single Python runner replaces v0.1's dual `.ps1`/`.sh` plan, sidestepping the shell-YAML trap and the Windows/POSIX split (the ICP spans both via Claude Code).
+Cross-platform note: the in-session handoff is the default path because it keeps the loop in the same Claude Code conversation. A single Python runner replaces v0.1's dual `.ps1`/`.sh` plan for users who want external execution, sidestepping the shell-YAML trap and the Windows/POSIX split (the ICP spans both via Claude Code).
 
 ---
 
@@ -233,7 +252,7 @@ A council sends your project context to *another* vendor's CLI. The wizard must 
 - **Name the destination.** When a non-local judge is selected, state which vendor/CLI the plan and deliveries will be sent to.
 - **Scope egress.** The `privacy.egress` block declares exactly what each member receives (`plan`, `deliveries`, specific paths).
 - **Redact.** Default redaction globs (`.env`, `secrets/**`, `**/*.key`) are applied before any send; the user can extend them.
-- **Consent.** `consent: required` makes the runner refuse the first cross-vendor send until the user confirms.
+- **Consent.** `consent: required` makes the session handoff ask before the first cross-vendor send and makes the runner refuse the send until the user confirms.
 - **Local-only path.** If a member's CLI is local (e.g. `ollama`), flag it as no-egress so privacy-sensitive users can keep the council in-house.
 
 ---
@@ -246,9 +265,10 @@ Standard skill anatomy (progressive disclosure). Confirmed against current Claud
 looper/
 ├── SKILL.md
 ├── references/            # the four rubrics + model-detection notes
-├── templates/            # loop.yaml, LOOP.md, run-loop.py, README
+├── templates/            # loop.yaml, README, run-loop.py
 ├── scripts/
-│   └── detect-models.py  # detection + register-model
+│   ├── detect-models.py  # detection wrapper
+│   └── looper.py         # detect/register/compile/render/session-prompt
 ├── examples/
 │   └── ai-workflow-mapping/
 ├── LICENSE
@@ -267,7 +287,8 @@ description: >
   LLM-as-judge loop, a multi-model "council," or a /goal-style looping
   process — even if they don't say "loop." Guides goal refinement,
   verification criteria, reviewer/judge selection (including non-Claude
-  models), and termination guards, then emits a portable loop.yaml + runner.
+  models), and termination guards, then emits RUN_IN_SESSION.md plus a portable
+  loop.yaml + runner.
 disable-model-invocation: true     # deliberate wizard with file writes; user-triggered only
 argument-hint: "[target-dir]"
 allowed-tools: Write Bash(python3 *)
@@ -293,7 +314,7 @@ Notes on the frontmatter choices:
 4. **Write the four rubrics** (verification first — highest leverage).
 5. **Build `detect-models` + the registry.**
 6. **Write `SKILL.md`** (the wizard) against the frozen schema.
-7. **Ship the `ai-workflow-mapping` example end-to-end** as the README demo.
+7. **Ship the `ai-workflow-mapping` example end-to-end** as the README demo, including `RUN_IN_SESSION.md`.
 
 ---
 

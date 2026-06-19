@@ -128,12 +128,18 @@ class LooperTests(unittest.TestCase):
                     "loop.resolved.json",
                     "--render",
                     "LOOP.md",
+                    "--session-prompt",
+                    "RUN_IN_SESSION.md",
                 ],
                 work,
             )
             self.assertEqual(compiled.returncode, 0, compiled.stderr)
             self.assertTrue((work / "loop.resolved.json").exists())
             self.assertTrue((work / "LOOP.md").exists())
+            session_prompt = (work / "RUN_IN_SESSION.md").read_text(encoding="utf-8")
+            self.assertIn("Run `fixture-loop` In This Session", session_prompt)
+            self.assertIn("Do not use `run-loop.py`", session_prompt)
+            self.assertIn("Max iterations: `2`", session_prompt)
 
             result = run_cmd([sys.executable, "run-loop.py"], work)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
@@ -170,6 +176,34 @@ class LooperTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             review = (work / "loop-workspace" / "review-plan_gate-1.md").read_text(encoding="utf-8")
             self.assertIn("unparseable_judge_output", review)
+
+    def test_session_prompt_command_renders_from_resolved_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            rendered = run_cmd(
+                [
+                    sys.executable,
+                    str(LOOPER),
+                    "session-prompt",
+                    "loop.resolved.json",
+                    "--out",
+                    "RUN_IN_SESSION.md",
+                ],
+                work,
+            )
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            prompt = (work / "RUN_IN_SESSION.md").read_text(encoding="utf-8")
+            self.assertIn("Use this prompt when the user wants to run", prompt)
+            self.assertIn("covers-goal", prompt)
 
 
 if __name__ == "__main__":

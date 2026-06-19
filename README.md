@@ -1,8 +1,8 @@
 # Looper
 
-**A loop design coach for Claude Code.** Looper is a skill that helps you design a *good* agent loop — a sharp goal, checkable verification, and a second model in the review seat — then emits a portable spec you can run. It is a scaffolder, not a runtime: it writes files, it doesn't orchestrate.
+**A loop design coach for Claude Code.** Looper is a skill that helps you design a *good* agent loop — a sharp goal, checkable verification, and a second model in the review seat — then lets you run it in the same session or save it as a portable spec. It is a design layer first: it writes files and hands the current session a clear execution prompt.
 
-Invoke it with `/looper`. It interviews you, critiques your design against built-in best-practice rubrics, lets you wire in a cross-model reviewer or judge (including non-Claude models), shows you the loop as a diagram, and writes out a `loop.yaml`, a compiled `loop.resolved.json`, and a thin `run-loop.py` you own and edit.
+Invoke it with `/looper`. It interviews you, critiques your design against built-in best-practice rubrics, lets you wire in a cross-model reviewer or judge (including non-Claude models), shows you the loop as a diagram, and writes out `RUN_IN_SESSION.md`, `loop.yaml`, a compiled `loop.resolved.json`, and a thin `run-loop.py` you own and edit.
 
 Maintainer: Kevin Simback · GitHub [@ksimback](https://github.com/ksimback) · X [@ksimback](https://x.com/ksimback)
 License: MIT
@@ -11,7 +11,7 @@ License: MIT
 
 ## Why not just use `/goal` or `/loop`?
 
-Claude Code already ships two pieces that look loop-shaped. They're useful — and they operate at a different layer than Looper. The short version: **`/goal` and `/loop` *run* a loop; Looper helps you *design* one that's worth running, then hands the artifact to whatever runs it.**
+Claude Code already ships two pieces that look loop-shaped. They're useful — and they operate at a different layer than Looper. The short version: **`/goal` and `/loop` *run* a loop; Looper helps you *design* one that's worth running, then gives the current session or an external runner a clear spec to follow.**
 
 ### What `/goal` actually does
 
@@ -31,7 +31,7 @@ It's the right tool for "run this thing every five minutes until I say stop." It
 
 ### Where Looper fits
 
-Looper is the **design layer that sits in front of both.** It produces a well-specified loop — coached goal, typed verification, a cross-model gate — as a file. That file can then be executed directly, or driven by `/goal` for in-session persistence, or fired on a schedule by `/loop`. Looper doesn't replace them; it gives them something good to run.
+Looper is the **design layer that sits in front of both.** It produces a well-specified loop — coached goal, typed verification, a cross-model gate — then gives you a default in-session handoff prompt plus a portable spec. The same design can be run immediately in the conversation, driven by `/goal` for persistence, fired on a schedule by `/loop`, or run later with Python. Looper doesn't replace them; it gives them something good to run.
 
 | | `/goal` | `/loop` | **Looper** |
 | :-- | :-- | :-- | :-- |
@@ -42,7 +42,7 @@ Looper is the **design layer that sits in front of both.** It produces a well-sp
 | Explicit review gates | implicit | none | **plan gate + delivery gate** |
 | Termination guards | goal-condition only | interval / until | **iteration + revision + budget caps** |
 | Portable, versionable artifact | no | the cron job | **`loop.yaml` + resolved spec** |
-| Runs the loop | **yes** | **yes** | no — emits files for them to run |
+| Runs the loop | **yes** | **yes** | **yes, by handing the current session a runnable prompt; Python runner optional** |
 
 The honest summary: if you already know your loop is well-designed and you just need it to persist or to fire on a schedule, `/goal` and `/loop` are the right reach. Looper exists for the part those don't touch — making sure the loop is *worth* persisting before you hand it off, and making sure something other than the author is checking the work.
 
@@ -61,13 +61,30 @@ git clone https://github.com/ksimback/looper ~/.claude/skills/looper
 Then, in Claude Code:
 
 ```text
-/looper ./my-loop
+/looper
 ```
 
-Looper interviews you, writes the artifacts into `./my-loop`, and shows you the loop diagram to confirm before anything is finalized. To run the result:
+Looper interviews you, writes the artifacts into a folder called `looper-output`,
+and shows you the loop diagram to confirm before anything is finalized. It then
+offers to run the loop right there in the same Claude Code session.
+
+If you want a different folder name, pass it after `/looper`, for example
+`/looper client-onboarding-loop`.
+
+### Easy: run in the same session
+
+The default path is to let Looper continue in the same conversation. It follows
+the generated `RUN_IN_SESSION.md` handoff, writes `plan.md`,
+`delivery-N.md`, `review-N.md`, and `state.json` into the loop workspace, and
+stops when the gates pass or a cap is reached.
+
+### Advanced: run outside the session
+
+Use the Python runner when you want to run the loop later, repeatably, from
+another terminal, or outside the LLM session:
 
 ```bash
-python3 ./my-loop/run-loop.py
+python3 ./looper-output/run-loop.py
 ```
 
 For local development, this repository root is the skill root. Edit and test it
@@ -84,25 +101,9 @@ here, then install or update the global skill by cloning or copying the repo to
 4. **Council** — add a reviewer (notes) or judge (verdict); Looper recommends a *different* model family than the host and explains why.
 5. **Gates & control** — confirm where review happens, revision and iteration caps, budget limits, and human checkpoints. Looper won't emit a loop with no termination guard.
 6. **Confirm** — review the loop as a diagram.
-7. **Emit** — `loop.yaml`, `loop.resolved.json`, `run-loop.py`, an empty workspace, and a README.
+7. **Run or emit** — Looper writes `RUN_IN_SESSION.md`, `loop.yaml`, `loop.resolved.json`, `run-loop.py`, an empty workspace, and a README. The default is to offer to run the loop in the current session; the Python runner is there for external control.
 
 A council sends your project context to another model's CLI. Looper makes that explicit, applies default redactions, lets you scope what's sent, and asks for consent before the first cross-vendor send. Pick a local model (e.g. via `ollama`) to keep the council in-house.
-
----
-
-## Status
-
-Early v0 scaffold. The design spec is in `looper-spec.md`; the current repo now
-includes the Claude Code skill entrypoint, rubrics, helper scripts, templates,
-schemas, fake-model tests, and an end-to-end example.
-
-Useful development commands:
-
-```bash
-python scripts/looper.py detect-models
-python scripts/looper.py compile examples/ai-workflow-mapping/loop.yaml --out examples/ai-workflow-mapping/loop.resolved.json --render examples/ai-workflow-mapping/LOOP.md
-python -m unittest discover -s tests
-```
 
 ## License
 
