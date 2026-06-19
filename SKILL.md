@@ -6,9 +6,9 @@ description: >
   up an agent loop, iterative agent workflow, self-review loop, LLM-as-judge
   loop, multi-model council, reviewer/judge gate, or /goal-style looping
   process. Guide goal refinement, typed verification criteria, reviewer and
-  judge selection, privacy boundaries, and termination guards, then emit a
-  RUN_IN_SESSION.md handoff prompt plus portable loop.yaml, loop.resolved.json,
-  LOOP.md, and run-loop.py.
+  judge selection, privacy boundaries, termination guards, no-progress stops,
+  and lightweight observability, then emit a RUN_IN_SESSION.md handoff prompt
+  plus portable loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
 disable-model-invocation: true
 argument-hint: "[target-dir]"
 allowed-tools: Write Bash(python3 *)
@@ -33,7 +33,9 @@ advanced external runner.
    - Control stage: `references/control-rubric.md`.
    - Model detection or privacy details: `references/model-detection.md`.
 3. Interview in seven stages: goal, verification, host model, council,
-   gates/control, confirmation diagram, emit/run option.
+   gates/control, confirmation diagram, emit/run option. In the control stage,
+   cover execution boundary, isolation, no-progress signals, state, and run
+   logging.
 4. Critique each stage before accepting it. Prefer concrete alternatives over
    vague warnings. Push weak goals toward outcome, scope, context, and done
    state. Push weak verification toward programmatic checks first, then judge
@@ -41,9 +43,9 @@ advanced external runner.
 5. Keep reviewer and judge roles distinct. A reviewer writes notes. A judge
    returns a structured verdict. `revise_until_clean` must name a judge member
    or `human` as `verdict_source`.
-6. Require at least one termination guard: `max_iterations`, a revision cap on
-   each gate, a budget cap, or an explicit human stop point. Prefer multiple
-   guards.
+6. Require multiple termination guards: `max_iterations`, a revision cap on
+   each gate, a no-progress stop, and either a budget cap or an explicit human
+   stop point.
 7. Before any cross-vendor council member is selected, state what context will
    leave the user's machine, which CLI receives it, which redaction globs apply,
    and that both execution paths require first-send consent.
@@ -114,6 +116,10 @@ flowchart TD
 - Each `revise_until_clean` gate has a valid `verdict_source`.
 - Every external invocation is an argv array with a timeout.
 - Cross-vendor egress is scoped, redacted, and consent-gated.
-- `loop_control` has iteration, revision, and wall-clock or budget caps.
+- `loop_control` has iteration, revision, no-progress, and wall-clock or budget
+  caps.
+- Execution boundary and isolation are explicit, even when the choice is the
+  current workspace.
+- Observability names a `run-log.md` and `state.json` path.
 - `loop.resolved.json`, `LOOP.md`, and `RUN_IN_SESSION.md` compile
   successfully before handoff.

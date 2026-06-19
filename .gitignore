@@ -10,6 +10,7 @@ build/
 .looper-tmp/
 tmp/
 scratch/
+~/
 
 # Generated example runs can contain user/project context.
 loop-workspace/
@@ -20,4 +21,3 @@ state.json
 .env.*
 secrets/
 *.key
-

@@ -40,13 +40,43 @@ Looper is the **design layer that sits in front of both.** It produces a well-sp
 | Typed, checkable verification | no | no | **yes (programmatic / judge / human)** |
 | Reviewer model | same model (self-check) | none | **a different model, by default** |
 | Explicit review gates | implicit | none | **plan gate + delivery gate** |
-| Termination guards | goal-condition only | interval / until | **iteration + revision + budget caps** |
+| Termination guards | goal-condition only | interval / until | **iteration + revision + no-progress + budget caps** |
 | Portable, versionable artifact | no | the cron job | **`loop.yaml` + resolved spec** |
 | Runs the loop | **yes** | **yes** | **yes, by handing the current session a runnable prompt; Python runner optional** |
 
 The honest summary: if you already know your loop is well-designed and you just need it to persist or to fire on a schedule, `/goal` and `/loop` are the right reach. Looper exists for the part those don't touch — making sure the loop is *worth* persisting before you hand it off, and making sure something other than the author is checking the work.
 
 > Sources for the `/goal` and `/loop` behavior described above: Claude Code skills and commands documentation at code.claude.com/docs. Behavior and version gates change frequently; verify against upstream before shipping.
+
+---
+
+## What Looper provides
+
+Looper provides loop design discipline: a clear goal, context sources,
+checkable verification, reviewer/judge gates, termination guards, a portable
+spec, a same-session execution handoff, and lightweight run state/log files.
+
+Looper does **not** provide durable orchestration. It does not schedule cron
+jobs for you, persist step-level retries across process restarts, manage
+sub-agent lifecycles, enforce concurrency controls, or store a production run
+history. If you need those guarantees, use Looper to design the loop and hand
+the resulting spec to an orchestrator built for durable execution.
+
+## Healthy loop checklist
+
+Before running a loop, Looper pushes you to make these explicit:
+
+- **Goal**: what outcome the loop is trying to produce.
+- **Context**: which files, commands, issues, or external sources the loop may
+  inspect.
+- **Actions**: which model, tools, commands, or human handoffs may change state.
+- **Feedback**: which programmatic checks, judges, reviewers, or humans decide
+  whether work is good enough.
+- **State**: where the loop records status, decisions, blockers, and outputs.
+- **Stop conditions**: success, max iterations, revision caps, budget caps, and
+  no-progress signals.
+- **Execution boundary**: current workspace, branch/worktree, external runner,
+  or a separate durable orchestrator.
 
 ---
 
@@ -75,8 +105,9 @@ If you want a different folder name, pass it after `/looper`, for example
 
 The default path is to let Looper continue in the same conversation. It follows
 the generated `RUN_IN_SESSION.md` handoff, writes `plan.md`,
-`delivery-N.md`, `review-N.md`, and `state.json` into the loop workspace, and
-stops when the gates pass or a cap is reached.
+`delivery-N.md`, `review-N.md`, `state.json`, and `run-log.md` into the loop
+workspace, and stops when the gates pass, a cap is reached, or repeated
+no-progress is detected.
 
 ### Advanced: run outside the session
 
@@ -99,7 +130,7 @@ here, then install or update the global skill by cloning or copying the repo to
 2. **Verification** — Looper forces checkable criteria, classified as programmatic (a command returns pass/fail), judge (a model scores a rubric), or human (you sign off).
 3. **Host model** — pick the model that drives the loop.
 4. **Council** — add a reviewer (notes) or judge (verdict); Looper recommends a *different* model family than the host and explains why.
-5. **Gates & control** — confirm where review happens, revision and iteration caps, budget limits, and human checkpoints. Looper won't emit a loop with no termination guard.
+5. **Gates & control** — confirm where review happens, revision and iteration caps, no-progress signals, budget limits, human checkpoints, and execution boundaries. Looper won't emit a loop with no termination guard.
 6. **Confirm** — review the loop as a diagram.
 7. **Run or emit** — Looper writes `RUN_IN_SESSION.md`, `loop.yaml`, `loop.resolved.json`, `run-loop.py`, an empty workspace, and a README. The default is to offer to run the loop in the current session; the Python runner is there for external control.
 

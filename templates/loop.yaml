@@ -66,11 +66,31 @@ loop_control:
     usd: 5.0
     tokens: 2000000
     wall_clock_min: 30
+  no_progress:
+    max_stalled_iterations: 2
+    signals:
+      - same blocking issue repeats
+      - delivery artifact has no material change
+      - verifier output is unchanged
+    action: stop
   human_checkpoints: []
   stop_conditions:
     - all deliveries pass their gate clean
     - max_iterations reached
+    - same blocker repeats for 2 iterations
     - any budget cap exceeded
+
+execution:
+  mode: in_session
+  isolation: current_workspace
+  side_effects:
+    requires_approval: true
+    duplicate_action_check: true
+
+observability:
+  state_file: state.json
+  run_log: run-log.md
+  checkpoint_granularity: gate
 
 privacy:
   egress:
@@ -81,5 +101,4 @@ privacy:
 
 workspace:
   dir: ./loop-workspace
-  layout: [plan.md, "delivery-{n}.md", "review-{n}.md", state.json]
-
+  layout: [plan.md, "delivery-{n}.md", "review-{n}.md", state.json, run-log.md]

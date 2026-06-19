@@ -140,12 +140,15 @@ class LooperTests(unittest.TestCase):
             self.assertIn("Run `fixture-loop` In This Session", session_prompt)
             self.assertIn("Do not use `run-loop.py`", session_prompt)
             self.assertIn("Max iterations: `2`", session_prompt)
+            self.assertIn("run-log.md", session_prompt)
+            self.assertIn("No-progress", session_prompt)
 
             result = run_cmd([sys.executable, "run-loop.py"], work)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertTrue((work / "loop-workspace" / "plan.md").exists())
             self.assertTrue((work / "loop-workspace" / "delivery-1.md").exists())
             self.assertTrue((work / "loop-workspace" / "review-plan_gate-1.md").exists())
+            self.assertTrue((work / "loop-workspace" / "run-log.md").exists())
             state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["status"], "passed")
 
@@ -204,6 +207,7 @@ class LooperTests(unittest.TestCase):
             prompt = (work / "RUN_IN_SESSION.md").read_text(encoding="utf-8")
             self.assertIn("Use this prompt when the user wants to run", prompt)
             self.assertIn("covers-goal", prompt)
+            self.assertIn("Execution Boundary", prompt)
 
 
 if __name__ == "__main__":

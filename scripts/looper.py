@@ -303,12 +303,78 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
         raise LooperError("loop_control.budget must be an object")
     if "wall_clock_min" not in budget:
         budget["wall_clock_min"] = 30
+    no_progress = control.setdefault(
+        "no_progress",
+        {
+            "max_stalled_iterations": 2,
+            "signals": [
+                "same blocking issue repeats",
+                "delivery artifact has no material change",
+                "verifier output is unchanged",
+            ],
+            "action": "stop",
+        },
+    )
+    if not isinstance(no_progress, dict):
+        raise LooperError("loop_control.no_progress must be an object")
+    stalled = no_progress.setdefault("max_stalled_iterations", 2)
+    if not isinstance(stalled, int) or stalled <= 0:
+        raise LooperError("loop_control.no_progress.max_stalled_iterations must be a positive integer")
+    signals = no_progress.setdefault("signals", ["same blocking issue repeats"])
+    if not isinstance(signals, list) or not all(isinstance(item, str) for item in signals):
+        raise LooperError("loop_control.no_progress.signals must be a list of strings")
+    action = no_progress.setdefault("action", "stop")
+    if action not in {"stop", "human_checkpoint"}:
+        raise LooperError("loop_control.no_progress.action must be stop or human_checkpoint")
+
+    execution = spec.setdefault(
+        "execution",
+        {
+            "mode": "in_session",
+            "isolation": "current_workspace",
+            "side_effects": {"requires_approval": True, "duplicate_action_check": True},
+        },
+    )
+    if not isinstance(execution, dict):
+        raise LooperError("execution must be an object")
+    execution.setdefault("mode", "in_session")
+    execution.setdefault("isolation", "current_workspace")
+    if execution["mode"] not in {"in_session", "external_runner", "orchestrated"}:
+        raise LooperError("execution.mode must be in_session, external_runner, or orchestrated")
+    if execution["isolation"] not in {"current_workspace", "branch", "worktree", "sandbox"}:
+        raise LooperError("execution.isolation must be current_workspace, branch, worktree, or sandbox")
+    side_effects = execution.setdefault("side_effects", {})
+    if not isinstance(side_effects, dict):
+        raise LooperError("execution.side_effects must be an object")
+    side_effects.setdefault("requires_approval", True)
+    side_effects.setdefault("duplicate_action_check", True)
+
+    observability = spec.setdefault(
+        "observability",
+        {"state_file": "state.json", "run_log": "run-log.md", "checkpoint_granularity": "gate"},
+    )
+    if not isinstance(observability, dict):
+        raise LooperError("observability must be an object")
+    observability.setdefault("state_file", "state.json")
+    observability.setdefault("run_log", "run-log.md")
+    observability.setdefault("checkpoint_granularity", "gate")
+    if not isinstance(observability["state_file"], str) or not observability["state_file"]:
+        raise LooperError("observability.state_file must be a non-empty string")
+    if not isinstance(observability["run_log"], str) or not observability["run_log"]:
+        raise LooperError("observability.run_log must be a non-empty string")
+    if observability["checkpoint_granularity"] not in {"gate", "step"}:
+        raise LooperError("observability.checkpoint_granularity must be gate or step")
 
     workspace = spec.setdefault("workspace", {})
     if not isinstance(workspace, dict):
         raise LooperError("workspace must be an object")
     workspace.setdefault("dir", "./loop-workspace")
-    workspace.setdefault("layout", ["plan.md", "delivery-{n}.md", "review-{n}.md", "state.json"])
+    layout = workspace.setdefault("layout", ["plan.md", "delivery-{n}.md", "review-{n}.md", "state.json", "run-log.md"])
+    if not isinstance(layout, list) or not all(isinstance(item, str) for item in layout):
+        raise LooperError("workspace.layout must be a list of strings")
+    for required_file in (observability["state_file"], observability["run_log"]):
+        if required_file not in layout:
+            layout.append(required_file)
 
     privacy = spec.setdefault("privacy", {})
     if not isinstance(privacy, dict):
@@ -338,6 +404,8 @@ def render_loop(resolved: dict[str, Any]) -> str:
     goal = resolved.get("goal", {})
     gates = resolved.get("gates", {})
     control = resolved.get("loop_control", {})
+    execution = resolved.get("execution", {})
+    observability = resolved.get("observability", {})
     title = meta.get("name") or "Looper Generated Loop"
     criteria = goal.get("verification", [])
     council = resolved.get("council", [])
@@ -381,6 +449,19 @@ def render_loop(resolved: dict[str, Any]) -> str:
             "",
             f"- Max iterations: {control.get('max_iterations')}",
             f"- Budget: `{json.dumps(control.get('budget', {}), sort_keys=True)}`",
+            f"- No-progress: `{json.dumps(control.get('no_progress', {}), sort_keys=True)}`",
+            "",
+            "## Execution Boundary",
+            "",
+            f"- Mode: `{execution.get('mode', 'in_session')}`",
+            f"- Isolation: `{execution.get('isolation', 'current_workspace')}`",
+            f"- Side effects: `{json.dumps(execution.get('side_effects', {}), sort_keys=True)}`",
+            "",
+            "## Observability",
+            "",
+            f"- State file: `{observability.get('state_file', 'state.json')}`",
+            f"- Run log: `{observability.get('run_log', 'run-log.md')}`",
+            f"- Checkpoint granularity: `{observability.get('checkpoint_granularity', 'gate')}`",
             "",
             "## Diagram",
             "",
@@ -406,6 +487,8 @@ def render_session_prompt(resolved: dict[str, Any]) -> str:
     gates = resolved.get("gates", {})
     control = resolved.get("loop_control", {})
     workspace = resolved.get("workspace", {})
+    execution = resolved.get("execution", {})
+    observability = resolved.get("observability", {})
     criteria = goal.get("verification", [])
     council = resolved.get("council", [])
     title = meta.get("name") or "Looper Generated Loop"
@@ -430,7 +513,10 @@ def render_session_prompt(resolved: dict[str, Any]) -> str:
         "6. Produce `delivery-N.md` in the workspace.",
         "7. Run the delivery gate after each delivery.",
         "8. Stop when all delivery criteria pass, a cap is reached, or the user stops the loop.",
-        "9. Keep `state.json` current with status, iteration, last gate, and any blockers.",
+        "9. Keep `state.json` current with status, iteration, last gate, consent, and blockers.",
+        "10. Append a compact entry to `run-log.md` after every context read, model call, check, gate verdict, revision, blocker, and stop decision.",
+        "11. Compare each blocker against the previous blocker. If the same blocker repeats for the configured no-progress window, stop or ask for the configured human checkpoint instead of revising again.",
+        "12. Treat token and USD budgets as operator limits in this session: if exact accounting is unavailable, stop and ask before continuing when the loop appears likely to exceed them.",
         "",
         "## Files",
         "",
@@ -438,6 +524,8 @@ def render_session_prompt(resolved: dict[str, Any]) -> str:
         "- Human summary: `LOOP.md`",
         "- Resolved spec: `loop.resolved.json`",
         f"- Workspace: `{workspace.get('dir', './loop-workspace')}`",
+        f"- State file: `{observability.get('state_file', 'state.json')}`",
+        f"- Run log: `{observability.get('run_log', 'run-log.md')}`",
         "",
         "## Goal",
         "",
@@ -505,12 +593,34 @@ def render_session_prompt(resolved: dict[str, Any]) -> str:
             "",
             f"- Max iterations: `{control.get('max_iterations')}`",
             f"- Budget: `{json.dumps(control.get('budget', {}), sort_keys=True)}`",
+            f"- No-progress: `{json.dumps(control.get('no_progress', {}), sort_keys=True)}`",
             f"- Human checkpoints: `{', '.join(control.get('human_checkpoints', [])) or 'none'}`",
             "- Stop conditions:",
         ]
     )
     for condition in control.get("stop_conditions", []):
         lines.append(f"  - {condition}")
+
+    lines.extend(
+        [
+            "",
+            "## Execution Boundary",
+            "",
+            f"- Mode: `{execution.get('mode', 'in_session')}`",
+            f"- Isolation: `{execution.get('isolation', 'current_workspace')}`",
+            f"- Side effects: `{json.dumps(execution.get('side_effects', {}), sort_keys=True)}`",
+            "",
+            "If the loop needs scheduled runs, child-agent lifecycle management, concurrency control, or restart-safe step retries, stop and tell the user this Looper spec should be handed to a durable orchestrator.",
+            "",
+            "## Observability",
+            "",
+            f"- State file: `{observability.get('state_file', 'state.json')}`",
+            f"- Run log: `{observability.get('run_log', 'run-log.md')}`",
+            f"- Checkpoint granularity: `{observability.get('checkpoint_granularity', 'gate')}`",
+            "",
+            "Use `state.json` for the latest resumable status and `run-log.md` for the append-only history of what happened.",
+        ]
+    )
 
     lines.extend(["", "## Privacy", ""])
     egress = resolved.get("privacy", {}).get("egress", [])

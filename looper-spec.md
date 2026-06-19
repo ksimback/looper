@@ -1,10 +1,10 @@
-# Looper — Design Spec (v0.3)
+# Looper — Design Spec (v0.4)
 
 *An open-source Claude Code skill that scaffolds well-designed agent loops.*
 
 Author: Kevin Simback ([@ksimback](https://x.com/ksimback) · github.com/ksimback)
-Status: draft v0.3 · License target: MIT
-Changes since v0.2: in-session execution handoff is now the default run path; Python runner remains the advanced external runner; `RUN_IN_SESSION.md` is generated from the resolved spec.
+Status: draft v0.4 · License target: MIT
+Changes since v0.3: loop-control now includes no-progress detection, execution-boundary metadata, and lightweight observability through `state.json` plus `run-log.md`.
 
 ---
 
@@ -24,6 +24,8 @@ Looper is a **scaffolder and session handoff, not an orchestration framework**, 
 
 The default "run now" path is `RUN_IN_SESSION.md`: a structured prompt/handoff that the current Claude Code session can follow immediately after design. The advanced external path is `run-loop.py`, which the user executes in their own environment. Both are generated from the resolved spec and make no design decisions: every choice is already baked into the loop artifacts. This keeps Looper from drifting into being a hidden orchestration framework by accident.
 
+Looper provides file-based state and run logs, but it does **not** provide durable orchestration. It does not schedule work, checkpoint every model/tool step across process restarts, manage child-agent lifecycles, enforce concurrency, or store a production run history. If the loop needs those guarantees, Looper should name that boundary and hand the spec to a real orchestrator.
+
 | Layer | Who | What |
 | :-- | :-- | :-- |
 | Design | Looper (`/looper`) | interview, coach, validate, emit |
@@ -39,7 +41,8 @@ The default "run now" path is `RUN_IN_SESSION.md`: a structured prompt/handoff t
 3. **Model-agnostic council.** The reviewer/judge can be any installed CLI model, chosen in the wizard. Cross-model is the recommended default.
 4. **File-based handoff.** Emitted loops pass state through a shared workspace of files; no fragile context piping.
 5. **Two execution surfaces, one resolved spec.** Author in YAML; generate `RUN_IN_SESSION.md` for easy in-session execution and `run-loop.py` for advanced external execution from the normalized `loop.resolved.json`. No shell-parsing of YAML.
-6. **Safe by construction.** argv arrays not shell strings; timeouts on every external call; no secrets stored by Looper; explicit consent before any cross-vendor context egress.
+6. **Honest durability.** Looper records state, logs decisions, and models resume boundaries, but it does not pretend to be a durable orchestration engine.
+7. **Safe by construction.** argv arrays not shell strings; timeouts on every external call; no secrets stored by Looper; explicit consent before any cross-vendor context egress.
 
 ---
 
@@ -115,11 +118,31 @@ gates:
 loop_control:
   max_iterations: 12
   budget: { usd: 5.00, tokens: 2_000_000, wall_clock_min: 30 }
+  no_progress:
+    max_stalled_iterations: 2
+    signals:
+      - same blocking issue repeats
+      - delivery artifact has no material change
+      - verifier output is unchanged
+    action: stop
   human_checkpoints: [after_plan]
   stop_conditions:
     - "all deliveries pass their gate clean"
     - "max_iterations reached"
+    - "same blocker repeats for 2 iterations"
     - "any budget cap exceeded"
+
+execution:
+  mode: in_session              # in_session | external_runner | orchestrated
+  isolation: current_workspace  # current_workspace | branch | worktree | sandbox
+  side_effects:
+    requires_approval: true
+    duplicate_action_check: true
+
+observability:
+  state_file: state.json
+  run_log: run-log.md
+  checkpoint_granularity: gate   # gate | step; Looper itself only guarantees gate-level handoff
 
 privacy:
   egress:
@@ -130,7 +153,7 @@ privacy:
 
 workspace:
   dir: ./loop-workspace
-  layout: [plan.md, "delivery-{n}.md", "review-{n}.md", state.json]
+  layout: [plan.md, "delivery-{n}.md", "review-{n}.md", state.json, run-log.md]
 ```
 
 ### Verification criteria (the value, encoded)
@@ -172,7 +195,7 @@ Rubric reference files under `references/`, loaded only when their wizard stage 
 - **`goal-rubric.md`** — outcome vs. activity framing, scope boundaries, explicit "done" state, gather-vs-assume context. Before/after examples.
 - **`verification-rubric.md`** — *the most important file.* Turning "make it good" into checkable criteria; the programmatic/judge/human taxonomy and when each applies; anti-patterns (criteria only the author model can grade; "success = no errors thrown"; all-vibe rubrics).
 - **`council-rubric.md`** — reviewer vs. judge selection; why cross-model beats same-family; writing judge rubrics that yield stable verdicts; scope guidance.
-- **`control-rubric.md`** — termination design: iteration/revision/budget caps, where to insert human checkpoints, failing safe.
+- **`control-rubric.md`** — termination design: iteration/revision/no-progress/budget caps, where to insert human checkpoints, execution boundaries, failing safe.
 
 ---
 
@@ -207,8 +230,8 @@ At compile time, Looper resolves each chosen model's `invoke` into the spec as a
 4. Revise up to `max_revisions`.
 5. Write `delivery-N.md`.
 6. Run the delivery gate.
-7. Keep `state.json` current.
-8. Stop on pass, cap breach, or user stop.
+7. Keep `state.json` current and append decisions/checks/blockers to `run-log.md`.
+8. Stop on pass, cap breach, repeated no-progress, or user stop.
 
 This path is easy and conversational, but caps are enforced by the current agent following instructions, not by a separate process.
 
@@ -221,8 +244,9 @@ This path is easy and conversational, but caps are enforced by the current agent
 3. Host drafts `plan.md`.
 4. **plan_gate:** run `programmatic` checks; invoke the `verdict_source` member (argv + timeout) for `judge` criteria; parse the structured verdict. On `revise`, write `review-N.md`, host revises, repeat up to `max_revisions`. Honor `human_checkpoints`.
 5. On clean, iterate deliveries: host writes `delivery-N.md`; **delivery_gate** runs the same way.
-6. Enforce `loop_control` (max_iterations, budget, wall_clock) on every cycle; stop immediately on breach.
-7. Stop on any `stop_condition`; write final output.
+6. Enforce `loop_control` (max_iterations, no_progress, budget, wall_clock) on every cycle; stop immediately on breach.
+7. Append a compact run log after each context, model, check, gate, and revision step.
+8. Stop on any `stop_condition`; write final output.
 
 The runner never decides *what* to do — only executes the resolved spec. Single language (Python: near-universal on the ICP's machines; argv, timeouts, and JSON parsing are all native). No dual-shell, no YAML parsing at runtime.
 
@@ -238,6 +262,8 @@ The runner never decides *what* to do — only executes the resolved spec. Singl
 ├── RUN_IN_SESSION.md     # default handoff prompt for current-session execution
 ├── run-loop.py           # advanced external runner (contract above)
 ├── loop-workspace/       # empty handoff dir with the file layout
+│   ├── state.json        # current status, iteration, blockers, consent
+│   └── run-log.md        # append-only step/decision/check log
 └── README.md             # how to run; attribution
 ```
 

@@ -28,6 +28,19 @@ A LOOP.md-style workflow map exists, every step has an owner, input, output, and
 
 - Max iterations: 12
 - Budget: `{"tokens": 2000000, "usd": 5.0, "wall_clock_min": 30}`
+- No-progress: `{"action": "stop", "max_stalled_iterations": 2, "signals": ["same blocking issue repeats", "delivery artifact has no material change", "verifier output is unchanged"]}`
+
+## Execution Boundary
+
+- Mode: `in_session`
+- Isolation: `current_workspace`
+- Side effects: `{"duplicate_action_check": true, "requires_approval": true}`
+
+## Observability
+
+- State file: `state.json`
+- Run log: `run-log.md`
+- Checkpoint granularity: `gate`
 
 ## Diagram
 

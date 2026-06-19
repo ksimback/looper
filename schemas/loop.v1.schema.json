@@ -69,6 +69,18 @@
       "properties": {
         "max_iterations": { "type": "integer", "minimum": 1 },
         "budget": { "type": "object" },
+        "no_progress": {
+          "type": "object",
+          "properties": {
+            "max_stalled_iterations": { "type": "integer", "minimum": 1 },
+            "signals": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "action": { "enum": ["stop", "human_checkpoint"] }
+          },
+          "additionalProperties": true
+        },
         "human_checkpoints": {
           "type": "array",
           "items": { "type": "string" }
@@ -78,6 +90,24 @@
           "items": { "type": "string" }
         }
       }
+    },
+    "execution": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["in_session", "external_runner", "orchestrated"] },
+        "isolation": { "enum": ["current_workspace", "branch", "worktree", "sandbox"] },
+        "side_effects": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "state_file": { "type": "string" },
+        "run_log": { "type": "string" },
+        "checkpoint_granularity": { "enum": ["gate", "step"] }
+      },
+      "additionalProperties": true
     },
     "privacy": { "type": "object" },
     "workspace": {
@@ -158,4 +188,3 @@
     }
   }
 }
-

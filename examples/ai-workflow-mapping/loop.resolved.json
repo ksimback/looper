@@ -1,6 +1,6 @@
 {
   "$schema": "https://github.com/ksimback/looper/schema/loop.resolved.v1.json",
-  "compiled_at": "2026-06-19T05:28:12+00:00",
+  "compiled_at": "2026-06-19T05:52:53+00:00",
   "council": [
     {
       "cli": "claude",
@@ -52,6 +52,14 @@
       "expect": "exit_zero",
       "id": "required-sections",
       "type": "programmatic"
+    }
+  },
+  "execution": {
+    "isolation": "current_workspace",
+    "mode": "in_session",
+    "side_effects": {
+      "duplicate_action_check": true,
+      "requires_approval": true
     }
   },
   "gates": {
@@ -126,9 +134,19 @@
     },
     "human_checkpoints": [],
     "max_iterations": 12,
+    "no_progress": {
+      "action": "stop",
+      "max_stalled_iterations": 2,
+      "signals": [
+        "same blocking issue repeats",
+        "delivery artifact has no material change",
+        "verifier output is unchanged"
+      ]
+    },
     "stop_conditions": [
       "all deliveries pass their gate clean",
       "max_iterations reached",
+      "same blocker repeats for 2 iterations",
       "any budget cap exceeded"
     ]
   },
@@ -137,6 +155,11 @@
     "created": "2026-06-18",
     "description": "Map a customer's manual workflow into an agent-ready process.",
     "name": "ai-workflow-mapping"
+  },
+  "observability": {
+    "checkpoint_granularity": "gate",
+    "run_log": "run-log.md",
+    "state_file": "state.json"
   },
   "privacy": {
     "egress": [
@@ -164,7 +187,8 @@
       "plan.md",
       "delivery-{n}.md",
       "review-{n}.md",
-      "state.json"
+      "state.json",
+      "run-log.md"
     ]
   }
 }

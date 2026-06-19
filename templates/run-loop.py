@@ -141,7 +141,9 @@ class Runner:
         self.spec = load_json(self.spec_path)
         self.workspace = relative_to_base(self.spec["workspace"]["dir"], self.base_dir)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.state_path = self.workspace / "state.json"
+        self.observability = self.spec.get("observability", {})
+        self.run_log_path = self.workspace / self.observability.get("run_log", "run-log.md")
+        self.state_path = self.workspace / self.observability.get("state_file", "state.json")
         self.state = self.load_state()
         self.started = time.monotonic()
 
@@ -161,6 +163,12 @@ class Runner:
         self.state["updated_at"] = utc_now()
         write_json(self.state_path, self.state)
 
+    def append_log(self, event: str, **fields: Any) -> None:
+        self.run_log_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = f" {json.dumps(fields, sort_keys=True)}" if fields else ""
+        with self.run_log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"- {utc_now()} `{event}`{payload}\n")
+
     def enforce_wall_clock(self) -> None:
         budget = self.spec.get("loop_control", {}).get("budget", {})
         wall_clock_min = budget.get("wall_clock_min")
@@ -168,7 +176,40 @@ class Runner:
             return
         if time.monotonic() - self.started > float(wall_clock_min) * 60:
             self.save_state(status="failed", failure="wall_clock_budget_exceeded")
+            self.append_log("stop", reason="wall_clock_budget_exceeded")
             raise RunnerError("Wall-clock budget exceeded")
+
+    def no_progress_reached(self, gate_name: str, failures: list[str]) -> bool:
+        if not failures:
+            self.save_state(no_progress={"count": 0, "signature": "", "gate": gate_name})
+            return False
+        config = self.spec.get("loop_control", {}).get("no_progress", {})
+        threshold = int(config.get("max_stalled_iterations", 2))
+        signature = "\n".join(sorted(failures))
+        previous = self.state.get("no_progress", {})
+        same_gate = previous.get("gate") == gate_name
+        same_signature = previous.get("signature") == signature
+        count = int(previous.get("count", 0)) + 1 if same_gate and same_signature else 1
+        progress = {
+            "gate": gate_name,
+            "signature": signature,
+            "count": count,
+            "threshold": threshold,
+            "updated_at": utc_now(),
+        }
+        self.save_state(no_progress=progress)
+        if count < threshold:
+            return False
+        self.append_log("no_progress_detected", gate=gate_name, count=count, failures=failures)
+        if config.get("action", "stop") == "human_checkpoint":
+            answer = input("No-progress detected. Type 'continue' to allow one more revision: ").strip().lower()
+            if answer == "continue":
+                progress["count"] = 0
+                self.save_state(no_progress=progress)
+                self.append_log("no_progress_override", gate=gate_name)
+                return False
+        self.save_state(status="failed", failure="no_progress_detected", blocking_issues=failures)
+        return True
 
     def criteria(self, ids: list[str]) -> list[dict[str, Any]]:
         by_id = self.spec.get("criteria_by_id", {})
@@ -220,10 +261,13 @@ class Runner:
                 path = relative_to_base(source["file"], self.base_dir)
                 if is_redacted(path, self.base_dir, [".env", ".env.*", "secrets/**", "**/*.key"]):
                     chunks.append(f"## Context source {index}: {source['file']}\n[redacted]\n")
+                    self.append_log("context", source=source["file"], status="redacted")
                 elif path.exists():
                     chunks.append(f"## Context source {index}: {source['file']}\n{path.read_text(encoding='utf-8')}\n")
+                    self.append_log("context", source=source["file"], status="read")
                 else:
                     chunks.append(f"## Context source {index}: {source['file']}\n[missing]\n")
+                    self.append_log("context", source=source["file"], status="missing")
             elif "cmd" in source:
                 argv = ensure_argv(source["cmd"], f"context_sources[{index}].cmd")
                 result = run_argv(argv, cwd=self.base_dir, timeout_sec=int(source.get("timeout_sec", 60)))
@@ -231,6 +275,7 @@ class Runner:
                     f"## Context source {index}: {' '.join(argv)}\n"
                     f"exit={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}\n"
                 )
+                self.append_log("context_cmd", argv=argv, returncode=result.returncode)
         context = "\n".join(chunks).strip()
         write_text(self.workspace / "context.md", context or "No context sources configured.")
         return context
@@ -260,8 +305,10 @@ class Runner:
 
     def run_host(self, phase: str, target: Path, artifact: str = "", review: str = "") -> None:
         self.enforce_wall_clock()
+        self.append_log("host_start", phase=phase, target=target.name)
         output = call_model(self.spec["host"], self.host_prompt(phase, artifact, review), self.base_dir)
         write_text(target, output)
+        self.append_log("host_done", phase=phase, target=target.name)
 
     def run_programmatic(self, criterion: dict[str, Any]) -> dict[str, Any]:
         argv = ensure_argv(criterion["check"], f"{criterion['id']}.check")
@@ -274,6 +321,12 @@ class Runner:
             passed = result.returncode != 0
         elif expect == "stdout_contains":
             passed = criterion.get("contains", "") in result.stdout
+        self.append_log(
+            "programmatic_check",
+            criterion=criterion["id"],
+            passed=passed,
+            returncode=result.returncode,
+        )
         return {
             "id": criterion["id"],
             "type": "programmatic",
@@ -323,6 +376,7 @@ class Runner:
         )
         verdict = parse_judge_output(output)
         verdict["member"] = member_id
+        self.append_log("judge_verdict", gate=gate_name, member=member_id, verdict=verdict.get("verdict"))
         return verdict
 
     def run_reviewers(
@@ -344,6 +398,7 @@ class Runner:
                 f"Gate: {gate_name}\nArtifact: {artifact_label}\n\n{artifact_text}\n"
             )
             notes.append(f"## {member_id}\n\n{call_model(member, prompt, self.base_dir)}")
+            self.append_log("reviewer_notes", gate=gate_name, member=member_id)
         return notes
 
     def human_check(self, criterion: dict[str, Any]) -> dict[str, Any]:
@@ -362,6 +417,7 @@ class Runner:
         criteria = self.criteria(gate.get("criteria", []))
         max_revisions = int(gate.get("max_revisions", 0))
         revision = 0
+        self.append_log("gate_start", gate=gate_name, artifact=artifact_label)
 
         while True:
             self.enforce_wall_clock()
@@ -414,11 +470,16 @@ class Runner:
 
             if not failures:
                 self.save_state(status=f"{gate_name}_passed", **{gate_name: {"passed_at": utc_now()}})
+                self.append_log("gate_passed", gate=gate_name, artifact=artifact_label)
                 return True
 
             review_text = "\n\n".join(review_parts + ["## Blocking Issues", "\n".join(f"- {item}" for item in failures)])
             review_path = self.workspace / f"review-{gate_name}-{revision + 1}.md"
             write_text(review_path, review_text)
+            self.append_log("gate_blocked", gate=gate_name, review=review_path.name, failures=failures)
+
+            if self.no_progress_reached(gate_name, failures):
+                return False
 
             if revision >= max_revisions:
                 self.save_state(
@@ -426,6 +487,7 @@ class Runner:
                     failure=f"{gate_name}_max_revisions_reached",
                     last_review=str(review_path),
                 )
+                self.append_log("stop", reason=f"{gate_name}_max_revisions_reached")
                 return False
 
             revised = call_model(
@@ -436,9 +498,11 @@ class Runner:
             write_text(artifact_path, revised)
             revision += 1
             self.save_state(status=f"{gate_name}_revision_{revision}", last_review=str(review_path))
+            self.append_log("revision", gate=gate_name, revision=revision, artifact=artifact_label)
 
     def run(self) -> int:
         self.save_state(status="running")
+        self.append_log("run_start", spec=str(self.spec_path))
         self.gather_context()
 
         plan_path = self.workspace / "plan.md"
@@ -455,10 +519,12 @@ class Runner:
             self.run_host("delivery", delivery_path)
             if self.run_gate("delivery_gate", delivery_path, delivery_path.name):
                 self.save_state(status="passed", final_delivery=str(delivery_path), completed_at=utc_now())
+                self.append_log("run_passed", final_delivery=str(delivery_path))
                 print(f"Looper run passed. Final delivery: {delivery_path}")
                 return 0
 
         self.save_state(status="failed", failure="max_iterations_reached")
+        self.append_log("stop", reason="max_iterations_reached")
         return 1
 
 
@@ -474,4 +540,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
