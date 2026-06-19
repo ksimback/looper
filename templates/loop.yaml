@@ -12,8 +12,8 @@ goal:
   context_sources:
     - file: ./inputs/process-notes.md
   definition_of_done: >
-    LOOP.md and a diagram exist, every step has a tool, model, or human owner,
-    and no step is left as TBD.
+    LOOP.md and an ASCII flow preview exist, every step has a tool, model, or
+    human owner, and no step is left as TBD.
   verification:
     - id: required-sections
       type: programmatic

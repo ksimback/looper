@@ -33,9 +33,9 @@ advanced external runner.
    - Control stage: `references/control-rubric.md`.
    - Model detection or privacy details: `references/model-detection.md`.
 3. Interview in seven stages: goal, verification, host model, council,
-   gates/control, confirmation diagram, emit/run option. In the control stage,
-   cover execution boundary, isolation, no-progress signals, state, and run
-   logging.
+   gates/control, confirmation flow preview, emit/run option. In the control
+   stage, cover execution boundary, isolation, no-progress signals, state, and
+   run logging.
 4. Critique each stage before accepting it. Prefer concrete alternatives over
    vague warnings. Push weak goals toward outcome, scope, context, and done
    state. Push weak verification toward programmatic checks first, then judge
@@ -49,8 +49,8 @@ advanced external runner.
 7. Before any cross-vendor council member is selected, state what context will
    leave the user's machine, which CLI receives it, which redaction globs apply,
    and that both execution paths require first-send consent.
-8. Show a Mermaid diagram of the planned loop and ask for confirmation before
-   final emission.
+8. Show an ASCII flow preview of the planned loop and ask for confirmation
+   before final emission. Optimize for Claude Code CLI readability.
 9. Emit these files into the target:
    - `loop.yaml`
    - `loop.resolved.json`
@@ -92,19 +92,49 @@ advanced external runner.
 - Render only the in-session handoff:
   `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
 
-## Confirmation Diagram
+## Confirmation Flow Preview
 
 Use this shape and customize labels:
 
-```mermaid
-flowchart TD
-  A["User goal and context"] --> B["Host drafts plan.md"]
-  B --> C{"Plan gate"}
-  C -- revise --> B
-  C -- clean --> D["Host writes delivery-N.md"]
-  D --> E{"Delivery gate"}
-  E -- revise --> D
-  E -- clean --> F["Stop with final output"]
+```text
++--------------------------------+
+| 1. Goal + context              |
+| read sources                   |
++--------------------------------+
+               |
+               v
++--------------------------------+
+| 2. Draft plan.md               |
+| state -> state.json            |
++--------------------------------+
+               |
+               v
++--------------------------------+
+| 3. Plan gate                   |
+| verdict: reviewer-1            |
++--------------------------------+
+               | needs work -> revise <= 3 -> step 2
+               | pass
+               v
++--------------------------------+
+| 4. Write delivery-N.md         |
+| log -> run-log.md              |
++--------------------------------+
+               |
+               v
++--------------------------------+
+| 5. Delivery gate               |
+| verdict: reviewer-1            |
++--------------------------------+
+               | needs work -> revise <= 3 -> step 4
+               | pass
+               v
++--------------------------------+
+| 6. Final output                |
+| all gates clean                |
++--------------------------------+
+
+Stops: pass gates | max 12 iterations | no progress x2 | budget 30m, $5.0
 ```
 
 ## Emit Checklist

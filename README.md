@@ -2,7 +2,7 @@
 
 **A loop design coach for Claude Code.** Looper is a skill that helps you design a *good* agent loop — a sharp goal, checkable verification, and a second model in the review seat — then lets you run it in the same session or save it as a portable spec. It is a design layer first: it writes files and hands the current session a clear execution prompt.
 
-Invoke it with `/looper`. It interviews you, critiques your design against built-in best-practice rubrics, lets you wire in a cross-model reviewer or judge (including non-Claude models), shows you the loop as a diagram, and writes out `RUN_IN_SESSION.md`, `loop.yaml`, a compiled `loop.resolved.json`, and a thin `run-loop.py` you own and edit.
+Invoke it with `/looper`. It interviews you, critiques your design against built-in best-practice rubrics, lets you wire in a cross-model reviewer or judge (including non-Claude models), shows you the loop as a terminal-friendly ASCII flow preview, and writes out `RUN_IN_SESSION.md`, `loop.yaml`, a compiled `loop.resolved.json`, and a thin `run-loop.py` you own and edit.
 
 Maintainer: Kevin Simback · GitHub [@ksimback](https://github.com/ksimback) · X [@ksimback](https://x.com/ksimback)
 License: MIT
@@ -107,8 +107,8 @@ Then, in Claude Code:
 ```
 
 Looper interviews you, writes the artifacts into a folder called `looper-output`,
-and shows you the loop diagram to confirm before anything is finalized. It then
-offers to run the loop right there in the same Claude Code session.
+and shows you an ASCII flow preview to confirm before anything is finalized. It
+then offers to run the loop right there in the same Claude Code session.
 
 If you want a different folder name, pass it after `/looper`, for example
 `/looper client-onboarding-loop`.
@@ -153,7 +153,7 @@ If Claude Code says `Unknown command: /looper`, check both install locations:
 3. **Host model** — pick the model that drives the loop.
 4. **Council** — add a reviewer (notes) or judge (verdict); Looper recommends a *different* model family than the host and explains why.
 5. **Gates & control** — confirm where review happens, revision and iteration caps, no-progress signals, budget limits, human checkpoints, and execution boundaries. Looper won't emit a loop with no termination guard.
-6. **Confirm** — review the loop as a diagram.
+6. **Confirm** — review the loop as an ASCII flow preview.
 7. **Run or emit** — Looper writes `RUN_IN_SESSION.md`, `loop.yaml`, `loop.resolved.json`, `run-loop.py`, an empty workspace, and a README. The default is to offer to run the loop in the current session; the Python runner is there for external control.
 
 A council sends your project context to another model's CLI. Looper makes that explicit, applies default redactions, lets you scope what's sent, and asks for consent before the first cross-vendor send. Pick a local model (e.g. via `ollama`) to keep the council in-house.

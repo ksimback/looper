@@ -10,7 +10,7 @@ Changes since v0.3: loop-control now includes no-progress detection, execution-b
 
 ## 1. What it is
 
-`Looper` is a Claude Code skill, invoked with `/looper`, that walks an agentic engineer through designing a multi-step agent loop — and **coaches them toward a good one** as they go. It interviews the user, critiques their goal and verification design against built-in best-practice rubrics, lets them wire in a cross-model reviewer/judge, renders the loop visually for confirmation, then **emits an in-session run prompt plus a portable loop spec and external runner**.
+`Looper` is a Claude Code skill, invoked with `/looper`, that walks an agentic engineer through designing a multi-step agent loop — and **coaches them toward a good one** as they go. It interviews the user, critiques their goal and verification design against built-in best-practice rubrics, lets them wire in a cross-model reviewer/judge, renders a terminal-friendly ASCII flow preview for confirmation, then **emits an in-session run prompt plus a portable loop spec and external runner**.
 
 The wedge is **design discipline + a cross-model council**, at the layer *before* execution. Claude Code already ships `/goal` (a persistent objective the model self-checks) and `/loop` (an interval scheduler). Neither helps you design a *good* loop, force a checkable definition of done, or get a second, different model's eyes — which is exactly where loops fail. Looper fills that gap and produces artifacts the current session, existing tools, or an external runner can follow. See the README's comparison section.
 
@@ -66,8 +66,8 @@ goal:
     - file: ./inputs/process-notes.md
     - cmd: "ls ./inputs/transcripts"      # argv-resolved at compile time
   definition_of_done: >
-    A LOOP.md + diagram the client can execute, every step mapped to a tool
-    or human action, nothing left as "TBD".
+    A LOOP.md + flow preview the client can execute, every step mapped to a
+    tool or human action, nothing left as "TBD".
 
   # Verification taxonomy is first-class structure, not prose.
   verification:
@@ -258,7 +258,7 @@ The runner never decides *what* to do — only executes the resolved spec. Singl
 <target>/
 ├── loop.yaml             # human-authored source
 ├── loop.resolved.json    # compiled, validated; the runner reads this
-├── LOOP.md               # human-readable rendering + diagram
+├── LOOP.md               # human-readable rendering + ASCII flow preview
 ├── RUN_IN_SESSION.md     # default handoff prompt for current-session execution
 ├── run-loop.py           # advanced external runner (contract above)
 ├── loop-workspace/       # empty handoff dir with the file layout
@@ -340,7 +340,7 @@ Notes on the frontmatter choices:
 4. **Write the four rubrics** (verification first — highest leverage).
 5. **Build `detect-models` + the registry.**
 6. **Write `SKILL.md`** (the wizard) against the frozen schema.
-7. **Ship the `ai-workflow-mapping` example end-to-end** as the README demo, including `RUN_IN_SESSION.md`.
+7. **Ship the `ai-workflow-mapping` example end-to-end** as the README demo, including `RUN_IN_SESSION.md` and the ASCII flow preview.
 
 ---
 

@@ -399,6 +399,61 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
     return to_jsonable(resolved)
 
 
+def clip(text: Any, width: int) -> str:
+    value = str(text or "")
+    return value if len(value) <= width else value[: width - 1] + "~"
+
+
+def ascii_box(*rows: str, width: int = 30) -> list[str]:
+    border = "+" + "-" * (width + 2) + "+"
+    body = [f"| {clip(row, width):<{width}} |" for row in rows if row is not None]
+    return [border, *body, border]
+
+
+def render_ascii_diagram(resolved: dict[str, Any]) -> str:
+    gates = resolved.get("gates", {})
+    control = resolved.get("loop_control", {})
+    observability = resolved.get("observability", {})
+    plan_gate = gates.get("plan_gate", {})
+    delivery_gate = gates.get("delivery_gate", {})
+    plan_revisions = plan_gate.get("max_revisions", 0)
+    delivery_revisions = delivery_gate.get("max_revisions", 0)
+    plan_source = plan_gate.get("verdict_source", "human")
+    delivery_source = delivery_gate.get("verdict_source", "human")
+    no_progress = control.get("no_progress", {})
+    stalled = no_progress.get("max_stalled_iterations", 2)
+    budget = control.get("budget", {})
+    budget_bits = []
+    if budget.get("wall_clock_min") is not None:
+        budget_bits.append(f"{budget.get('wall_clock_min')}m")
+    if budget.get("usd") is not None:
+        budget_bits.append(f"${budget.get('usd')}")
+    if budget.get("tokens") is not None:
+        budget_bits.append(f"{budget.get('tokens')} tokens")
+    budget_text = ", ".join(budget_bits) or "configured caps"
+
+    lines: list[str] = []
+    lines.extend(ascii_box("1. Goal + context", "read sources"))
+    lines.extend(["               |", "               v"])
+    lines.extend(ascii_box("2. Draft plan.md", f"state -> {observability.get('state_file', 'state.json')}"))
+    lines.extend(["               |", "               v"])
+    lines.extend(ascii_box("3. Plan gate", f"verdict: {plan_source}"))
+    lines.extend([f"               | needs work -> revise <= {plan_revisions} -> step 2", "               | pass", "               v"])
+    lines.extend(ascii_box("4. Write delivery-N.md", f"log -> {observability.get('run_log', 'run-log.md')}"))
+    lines.extend(["               |", "               v"])
+    lines.extend(ascii_box("5. Delivery gate", f"verdict: {delivery_source}"))
+    lines.extend([f"               | needs work -> revise <= {delivery_revisions} -> step 4", "               | pass", "               v"])
+    lines.extend(ascii_box("6. Final output", "all gates clean"))
+    lines.extend(
+        [
+            "",
+            f"Stops: pass gates | max {control.get('max_iterations')} iterations | "
+            f"no progress x{stalled} | budget {budget_text}",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def render_loop(resolved: dict[str, Any]) -> str:
     meta = resolved.get("meta", {})
     goal = resolved.get("goal", {})
@@ -463,17 +518,10 @@ def render_loop(resolved: dict[str, Any]) -> str:
             f"- Run log: `{observability.get('run_log', 'run-log.md')}`",
             f"- Checkpoint granularity: `{observability.get('checkpoint_granularity', 'gate')}`",
             "",
-            "## Diagram",
+            "## Flow Preview",
             "",
-            "```mermaid",
-            "flowchart TD",
-            '  A["Goal and context"] --> B["Host drafts plan.md"]',
-            '  B --> C{"Plan gate"}',
-            '  C -- revise --> B',
-            '  C -- clean --> D["Host writes delivery-N.md"]',
-            '  D --> E{"Delivery gate"}',
-            '  E -- revise --> D',
-            '  E -- clean --> F["Final output"]',
+            "```text",
+            render_ascii_diagram(resolved),
             "```",
             "",
         ]

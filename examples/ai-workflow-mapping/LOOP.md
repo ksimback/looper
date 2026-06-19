@@ -42,15 +42,45 @@ A LOOP.md-style workflow map exists, every step has an owner, input, output, and
 - Run log: `run-log.md`
 - Checkpoint granularity: `gate`
 
-## Diagram
+## Flow Preview
 
-```mermaid
-flowchart TD
-  A["Goal and context"] --> B["Host drafts plan.md"]
-  B --> C{"Plan gate"}
-  C -- revise --> B
-  C -- clean --> D["Host writes delivery-N.md"]
-  D --> E{"Delivery gate"}
-  E -- revise --> D
-  E -- clean --> F["Final output"]
+```text
++--------------------------------+
+| 1. Goal + context              |
+| read sources                   |
++--------------------------------+
+               |
+               v
++--------------------------------+
+| 2. Draft plan.md               |
+| state -> state.json            |
++--------------------------------+
+               |
+               v
++--------------------------------+
+| 3. Plan gate                   |
+| verdict: reviewer-1            |
++--------------------------------+
+               | needs work -> revise <= 3 -> step 2
+               | pass
+               v
++--------------------------------+
+| 4. Write delivery-N.md         |
+| log -> run-log.md              |
++--------------------------------+
+               |
+               v
++--------------------------------+
+| 5. Delivery gate               |
+| verdict: reviewer-1            |
++--------------------------------+
+               | needs work -> revise <= 3 -> step 4
+               | pass
+               v
++--------------------------------+
+| 6. Final output                |
+| all gates clean                |
++--------------------------------+
+
+Stops: pass gates | max 12 iterations | no progress x2 | budget 30m, $5.0, 2000000 tokens
 ```
