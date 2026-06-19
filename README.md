@@ -82,10 +82,22 @@ Before running a loop, Looper pushes you to make these explicit:
 
 ## Quick start
 
-Install as a global personal skill:
+Install as a global personal skill and slash command.
+
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/ksimback/looper "$env:USERPROFILE\.claude\skills\looper"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\commands" | Out-Null
+Copy-Item "$env:USERPROFILE\.claude\skills\looper\commands\looper.md" "$env:USERPROFILE\.claude\commands\looper.md" -Force
+```
+
+On macOS/Linux:
 
 ```bash
-git clone https://github.com/ksimback/looper ~/.claude/skills/looper
+git clone https://github.com/ksimback/looper "$HOME/.claude/skills/looper"
+mkdir -p "$HOME/.claude/commands"
+cp "$HOME/.claude/skills/looper/commands/looper.md" "$HOME/.claude/commands/looper.md"
 ```
 
 Then, in Claude Code:
@@ -120,7 +132,17 @@ python3 ./looper-output/run-loop.py
 
 For local development, this repository root is the skill root. Edit and test it
 here, then install or update the global skill by cloning or copying the repo to
-`~/.claude/skills/looper`.
+`$HOME/.claude/skills/looper` and copying `commands/looper.md` to
+`$HOME/.claude/commands/looper.md`.
+
+If Claude Code says `Unknown command: /looper`, check both install locations:
+
+- The skill must exist at your real home directory, for example
+  `C:\Users\kevin\.claude\skills\looper` on Windows.
+- The slash command must exist at `C:\Users\kevin\.claude\commands\looper.md`
+  on Windows.
+- If you see a literal folder named `~` inside your project, your shell did not
+  expand `~`; rerun the PowerShell install commands above.
 
 ---
 
