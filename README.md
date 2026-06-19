@@ -1,4 +1,47 @@
-# Looper
+<div align="center">
+
+<pre>
+ _        ___   ___  ____  _____ ____
+| |      / _ \ / _ \|  _ \| ____|  _ \
+| |     | | | | | | | |_) |  _| | |_) |
+| |___  | |_| | |_| |  __/| |___|  _ <
+|_____|  \___/ \___/|_|   |_____|_| \_\
+</pre>
+
+<p>
+  <strong>Design agent loops before you run them.</strong><br>
+  Goal -> Plan -> Review -> Deliver -> Judge -> Stop clean.
+</p>
+
+<p>
+  <a href="#quick-start">Quick start</a> |
+  <a href="#example-loop-diagram">Example loop</a> |
+  <a href="#how-it-works">How it works</a>
+</p>
+
+</div>
+
+## Example loop diagram
+
+Looper turns a fuzzy automation idea into a reviewable loop shape before any
+runner starts changing files. This example comes from
+[`examples/ai-workflow-mapping`](examples/ai-workflow-mapping/loop.yaml).
+
+```mermaid
+flowchart TD
+    G["Goal + context<br/>process notes + definition of done"] --> P["Draft plan.md<br/>host: codex / gpt-5"]
+    P --> PG{"Plan gate<br/>judge: reviewer-1"}
+    PG -- "revise <= 3" --> P
+    PG -- "pass" --> D["Write delivery-N.md<br/>map the workflow"]
+    D --> DG{"Delivery gate<br/>programmatic check + judge"}
+    DG -- "revise <= 3" --> D
+    DG -- "pass" --> F["Final output<br/>all gates clean"]
+
+    S["State + log<br/>state.json + run-log.md"] -. "records" .-> P
+    S -. "records" .-> D
+    Stop["Stop guards<br/>max 12 iterations<br/>no progress x2<br/>budget caps"] -. "watch" .-> PG
+    Stop -. "watch" .-> DG
+```
 
 **A loop design coach for Claude Code.** Looper is a skill that helps you design a *good* agent loop — a sharp goal, checkable verification, and a second model in the review seat — then lets you run it in the same session or save it as a portable spec. It is a design layer first: it writes files and hands the current session a clear execution prompt.
 
@@ -87,18 +130,37 @@ Install as a global personal skill and slash command.
 On Windows PowerShell:
 
 ```powershell
+irm https://raw.githubusercontent.com/ksimback/looper/main/install.ps1 | iex
+```
+
+On macOS/Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ksimback/looper/main/install.sh | bash
+```
+
+If you prefer to inspect each step, use the manual install:
+
+<details>
+<summary>Manual install commands</summary>
+
+Windows PowerShell:
+
+```powershell
 git clone https://github.com/ksimback/looper "$env:USERPROFILE\.claude\skills\looper"
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.claude\commands" | Out-Null
 Copy-Item "$env:USERPROFILE\.claude\skills\looper\commands\looper.md" "$env:USERPROFILE\.claude\commands\looper.md" -Force
 ```
 
-On macOS/Linux:
+macOS/Linux:
 
 ```bash
 git clone https://github.com/ksimback/looper "$HOME/.claude/skills/looper"
 mkdir -p "$HOME/.claude/commands"
 cp "$HOME/.claude/skills/looper/commands/looper.md" "$HOME/.claude/commands/looper.md"
 ```
+
+</details>
 
 Then, in Claude Code:
 
@@ -142,7 +204,7 @@ If Claude Code says `Unknown command: /looper`, check both install locations:
 - The slash command must exist at `C:\Users\kevin\.claude\commands\looper.md`
   on Windows.
 - If you see a literal folder named `~` inside your project, your shell did not
-  expand `~`; rerun the PowerShell install commands above.
+  expand `~`; rerun the installer or manual PowerShell commands above.
 
 ---
 
