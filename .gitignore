@@ -22,3 +22,6 @@ state.json
 .env.*
 secrets/
 *.key
+
+# Machine-local Claude Code settings (personal paths, never shared).
+.claude/settings.local.json
