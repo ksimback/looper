@@ -116,8 +116,10 @@ Before running a loop, Looper pushes you to make these explicit:
 - **Feedback**: which programmatic checks, judges, reviewers, or humans decide
   whether work is good enough.
 - **State**: where the loop records status, decisions, blockers, and outputs.
-- **Stop conditions**: success, max iterations, revision caps, budget caps, and
-  no-progress signals.
+- **Stop conditions**: success, max iterations, revision caps, no-progress
+  signals, and budget caps. The external runner enforces wall-clock caps;
+  token/USD caps are operator-visible advisory limits unless you add accounting
+  around the configured CLIs.
 - **Execution boundary**: current workspace, branch/worktree, external runner,
   or a separate durable orchestrator.
 

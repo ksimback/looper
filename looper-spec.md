@@ -244,7 +244,7 @@ This path is easy and conversational, but caps are enforced by the current agent
 3. Host drafts `plan.md`.
 4. **plan_gate:** run `programmatic` checks; invoke the `verdict_source` member (argv + timeout) for `judge` criteria; parse the structured verdict. On `revise`, write `review-N.md`, host revises, repeat up to `max_revisions`. Honor `human_checkpoints`.
 5. On clean, iterate deliveries: host writes `delivery-N.md`; **delivery_gate** runs the same way.
-6. Enforce `loop_control` (max_iterations, no_progress, budget, wall_clock) on every cycle; stop immediately on breach.
+6. Enforce `loop_control` on every cycle. The runner enforces `max_iterations`, `no_progress`, and `budget.wall_clock_min`; `budget.usd` and `budget.tokens` are rendered into prompts/logs as advisory operator limits unless a wrapper adds provider-specific accounting.
 7. Append a compact run log after each context, model, check, gate, and revision step.
 8. Stop on any `stop_condition`; write final output.
 
