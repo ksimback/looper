@@ -72,6 +72,8 @@ def load_yaml(path: Path) -> dict[str, Any]:
     try:
         with path.open("r", encoding="utf-8") as fh:
             data = yaml.safe_load(fh)
+    except OSError as exc:
+        raise LooperError(f"Could not read {path}: {exc}") from exc
     except yaml.YAMLError as exc:
         raise LooperError(f"Could not parse YAML in {path}: {exc}") from exc
     if not isinstance(data, dict):

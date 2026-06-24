@@ -7,6 +7,7 @@ loop.resolved.json and uses only Python stdlib.
 
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
 import fnmatch
 import json
@@ -31,8 +32,13 @@ def utc_now() -> str:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise RunnerError(f"Could not read {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise RunnerError(f"Could not parse JSON in {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise RunnerError(f"{path} must contain a JSON object")
     return data
@@ -562,10 +568,17 @@ class Runner:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    spec_path = Path(argv[0]) if argv else Path(__file__).with_name("loop.resolved.json")
+    parser = argparse.ArgumentParser(description="Run a compiled Looper loop.")
+    parser.add_argument(
+        "spec_path",
+        nargs="?",
+        type=Path,
+        default=Path(__file__).with_name("loop.resolved.json"),
+        help="Path to loop.resolved.json (defaults to the file next to run-loop.py).",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        return Runner(spec_path).run()
+        return Runner(args.spec_path).run()
     except RunnerError as exc:
         print(f"run-loop: error: {exc}", file=sys.stderr)
         return 2
