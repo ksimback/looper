@@ -9,22 +9,70 @@ description: >
   judge selection, privacy boundaries, termination guards, no-progress stops,
   and lightweight observability, then emit a RUN_IN_SESSION.md handoff prompt
   plus portable loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
-disable-model-invocation: true
-argument-hint: "[target-dir]"
-allowed-tools: Write Bash
+tags: [agent-loop, llm-as-judge, multi-model, review-council, planning, hermes-port]
+related_skills: [swarm-sprint-execution, kanban-orchestrator, systematic-debugging]
 ---
 
-# Looper
+# Looper (Hermes port)
+
+> **Fork of [ksimback/looper](https://github.com/ksimback/looper)** with native
+> integration for [Hermes Agent](https://hermes-agent.nousresearch.com).
+> The contract of `loop.yaml` / `loop.resolved.json` / `LOOP.md` /
+> `RUN_IN_SESSION.md` is identical to upstream — loops designed in Claude Code
+> can be copied here and vice versa. Only `run-loop.py` gets an opt-in
+> alternative (`hermes-runner.py`).
 
 Use Looper as a loop design coach and scaffolder. During design, interview,
 critique, validate, and write files. After emission, offer to run the loop in
 the current session using `RUN_IN_SESSION.md`; keep `run-loop.py` as the
-advanced external runner.
+advanced external runner, or `heres-runner.py` as the Hermes-native runner.
+
+## Invoking this skill (Hermes)
+
+This skill follows the standard Hermes skill pattern. The skill body is loaded
+with `skill_view(name='looper')` and then used as the operating instructions
+for the rest of this turn. From the user's perspective, the natural triggers
+are:
+
+- "design a loop for X"
+- "set up a /goal-style loop"
+- "I want a multi-model review council for this"
+- "scaffold an agent loop"
+
+## Resolving the Looper install root
+
+All `looper.py` invocations need the path to this skill's directory. Set it
+once per session, then use `$LOOPER_DIR` everywhere:
+
+```bash
+# Adjust to the actual install path. Upstream install puts it at $HOME/.claude/skills/looper
+# on Claude Code; the Hermes install (see install.sh) puts it at $HOME/.hermes/skills/looper
+export LOOPER_DIR="$HOME/.hermes/skills/looper"
+```
+
+If the user is inside Claude Code, the same code path works because the
+upstream install is at `$HOME/.claude/skills/looper`. Detect at runtime:
+
+```bash
+if [ -d "$HOME/.hermes/skills/looper" ]; then
+  export LOOPER_DIR="$HOME/.hermes/skills/looper"
+elif [ -d "$HOME/.claude/skills/looper" ]; then
+  export LOOPER_DIR="$HOME/.claude/skills/looper"
+else
+  echo "looper: not installed. Run install.sh first." >&2
+  exit 1
+fi
+```
+
+> **Note for Hermes-native runners**: the `hermes-runner.py` script reads
+> `loop.resolved.json` and dispatches steps through `delegate_task` and
+> `cronjob` instead of `subprocess`. The spec format is the same; only the
+> execution boundary changes. See "Hermes-native execution" below.
 
 ## Workflow
 
-1. Resolve the target path from the `/looper` argument. If no target is given,
-   use `./looper-output`. If the target contains an existing `loop.yaml`, treat
+1. Resolve the target path from the user. If no target is given, use
+   `./looper-output`. If the target contains an existing `loop.yaml`, treat
    the task as an edit/resume instead of a fresh scaffold.
 2. Load the relevant rubric only when entering that stage:
    - Goal stage: `references/goal-rubric.md`.
@@ -50,22 +98,24 @@ advanced external runner.
    leave the user's machine, which CLI receives it, which redaction globs apply,
    and that both execution paths require first-send consent.
 8. Show an ASCII flow preview of the planned loop and ask for confirmation
-   before final emission. Optimize for Claude Code CLI readability.
+   before final emission. Optimize for terminal readability (the same shape
+   works in Claude Code, Hermes, and any CLI).
 9. Emit these files into the target:
    - `loop.yaml`
    - `loop.resolved.json`
    - `LOOP.md`
    - `RUN_IN_SESSION.md`
-   - `run-loop.py`
+   - `run-loop.py` (upstream runner, subprocess-based) — required
+   - `hermes-runner.py` (Hermes-native runner, `delegate_task`/`cronjob` based) — opt-in
    - `loop-workspace/`
    - `README.md`
 10. After writing `loop.yaml`, run:
-   `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
-   If `python3` is not available, try `python`.
+    `LOOPER_PYTHON="${LOOPER_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${LOOPER_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+    If `python3` is not available, try `python`.
 11. Ask whether the user wants to run the loop now in this session. If yes,
-   follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
-   the same file is the easy restart path and `run-loop.py` is available for
-   advanced external execution.
+    follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
+    the same file is the easy restart path. For durable recurring execution
+    across sessions, see "Hermes-native execution" below.
 
 ## File Rules
 
@@ -79,18 +129,49 @@ advanced external runner.
 - Keep `RUN_IN_SESSION.md` as the default/easy execution handoff. It is meant
   for the current LLM session or a future pasted prompt.
 - Copy `templates/run-loop.py` exactly unless the user explicitly asks to edit
-  the external runner contract.
+  the external runner contract. The Hermes-native runner is a separate file.
+
+## Hermes-native execution
+
+When the user wants the loop to be **durable** (survive a Hermes session
+restart), **observable** (findable via `session_search`), or **scheduled**
+(fire on a cron cadence), the upstream `run-loop.py` is the wrong tool — it
+runs in-process and has no notion of session identity. The Hermes port adds
+`templates/hermes-runner.py`, a drop-in alternative that:
+
+- Dispatches each host step via `delegate_task(goal=…, toolsets=[…])`, so the
+  work happens in a fresh subagent context with its own model selection.
+- Dispatches each judge step via `delegate_task(goal=…, model=<judge-vendor>)`,
+  preserving the cross-model review-council property (different model in the
+  judge seat).
+- Records run state and log via the same `state.json` / `run-log.md` files as
+  the upstream runner, so the two runners are observation-compatible.
+- Can be scheduled with `cronjob(action='create', script='python3
+  hermes-runner.py', schedule='<cron-expr>', notify_on_complete=true)`.
+
+The Hermes runner does not replace `run-loop.py`. It complements it. The
+default for in-session/interactive work is `RUN_IN_SESSION.md`; the default for
+batch/recurring work is `hermes-runner.py`; the upstream `run-loop.py` stays
+for anyone who wants vanilla `subprocess`-based execution (e.g. inside a
+container, CI, or `make`).
 
 ## Helper Scripts
 
+All assume `LOOPER_DIR` is exported and the venv exists (run `install.sh`
+once).
+
 - Detect model CLIs:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py detect-models --write`
+  `"$LOOPER_PYTHON" ${LOOPER_DIR}/scripts/looper.py detect-models --write`
 - Register a custom CLI:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke <cmd> [args...]`
+  `"$LOOPER_PYTHON" ${LOOPER_DIR}/scripts/looper.py register-model <id> --invoke <cmd> [args...]`
 - Compile and render:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+  `"$LOOPER_PYTHON" ${LOOPER_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
 - Render only the in-session handoff:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
+  `"$LOOPER_PYTHON" ${LOOPER_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
+- Run a compiled loop (subprocess runner, upstream):
+  `python3 <target>/run-loop.py`
+- Run a compiled loop (Hermes-native runner, opt-in):
+  `python3 <target>/hermes-runner.py`
 
 ## Confirmation Flow Preview
 
@@ -153,3 +234,18 @@ Stops: pass gates | max 12 iterations | no progress x2 | budget 30m, $5.0
 - Observability names a `run-log.md` and `state.json` path.
 - `loop.resolved.json`, `LOOP.md`, and `RUN_IN_SESSION.md` compile
   successfully before handoff.
+
+## Compatibility with upstream
+
+| Aspect | Upstream Claude Code | This fork (Hermes) |
+|---|---|---|
+| `loop.yaml` / `loop.resolved.json` / `LOOP.md` / `RUN_IN_SESSION.md` schema | v1 | **v1 (identical)** |
+| `scripts/looper.py` (compiler) | unchanged | **unchanged** |
+| `references/*.md` (rubrics) | unchanged | **unchanged** |
+| `schemas/*.json` | unchanged | **unchanged** |
+| `templates/run-loop.py` (subprocess runner) | upstream | **upstream, unmodified** |
+| `templates/hermes-runner.py` (native runner) | n/a | **new, opt-in** |
+| `commands/looper.md` (slash command) | exists | **dropped (Hermes has no slash-command system)** |
+| `install.sh` | `$HOME/.claude/skills/looper` | **`$HOME/.hermes/skills/looper`** |
+| Frontmatter `disable-model-invocation`, `argument-hint`, `allowed-tools` | required | **dropped (Hermes frontmatter is `name` + `description`)** |
+| Path variable | `${CLAUDE_SKILL_DIR}` | **`${LOOPER_DIR}`** (upstream install paths also detected) |

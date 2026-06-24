@@ -224,6 +224,108 @@ If Claude Code says `Unknown command: /looper`, check both install locations:
 
 A council sends your project context to another model's CLI. Looper makes that explicit, applies default redactions, lets you scope what's sent, and asks for consent before the first cross-vendor send. Pick a local model (e.g. via `ollama`) to keep the council in-house.
 
+## Hermes Agent integration (this fork)
+
+> This is the **Hermes port** of [ksimback/looper](https://github.com/ksimback/looper).
+> It preserves 100% of the `loop.yaml` / `loop.resolved.json` / `LOOP.md` /
+> `RUN_IN_SESSION.md` contract, so any loop you design in Claude Code runs
+> unchanged here and vice versa. The fork adds a Hermes-native runner and
+> rewires the install path for `~/.hermes/skills/looper`.
+
+### Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alvroble/loopermes/main/install.sh | bash
+```
+
+The installer:
+
+- Clones the repo to `$HOME/.hermes/skills/looper`
+- Creates `.venv/` inside the install and installs `PyYAML`
+- If `$HOME/.claude/` is detected, also wires `/looper` as a slash command
+  (so the same checkout works on both Claude Code and Hermes)
+
+Override the source with `LOOPER_REPO_URL=https://...` before running.
+
+### Use the skill
+
+In Hermes, the skill loads automatically as `looper`. Just say:
+
+- "design a loop for X"
+- "scaffold an agent loop"
+- "I want a multi-model review council for this"
+
+The skill will interview you (goal → verification → host → council → gates →
+control → preview → emit), coach each stage against the upstream rubrics, and
+write the loop files into `./looper-output/` by default.
+
+### Two runners, one spec
+
+| Runner | Use when | Dispatch model |
+|---|---|---|
+| `run-loop.py` (upstream, unchanged) | You want raw `subprocess.run` to a specific CLI; you're inside a container/CI; you're testing the spec format itself | `host.invoke` argv array is invoked directly via `subprocess` |
+| `hermes-runner.py` (this fork, new) | You want each step to be a real Hermes session (logged in `session_search`, model-isolated, hermes-rule-aware); you want to schedule the loop with `hermes cron create` | `hermes chat -q … -m <vendor>/<model>` with `--ignore-user-config --ignore-rules` for isolation |
+
+The two runners are **observation-compatible**: they both read
+`loop.resolved.json` and both produce the same `state.json` / `run-log.md` /
+`plan.md` / `delivery-N.md` artifacts. A `state.json` from one runner is
+inspectable from a session that ran the other (the `engine` field tells
+them apart).
+
+### Mapping `invoke` to `hermes chat`
+
+`hermes-runner.py` parses each model member's `invoke` argv array and maps
+common CLIs to `hermes chat` flags:
+
+| `invoke[0]` | Maps to | Example |
+|---|---|---|
+| `codex` | `hermes chat -m openai/<model>` | `["codex", "exec", "--model", "gpt-5"]` → `openai/gpt-5` |
+| `claude` | `hermes chat -m anthropic/<model>` | `["claude", "-p"]` → `anthropic/default` |
+| `hermes` | passthrough | `["hermes", "-m", "openai/gpt-4.1-mini"]` → `openai/gpt-4.1-mini` |
+| `grok` | `hermes chat -m xai/<model>` | `["grok", "-m", "grok-2"]` → `xai/grok-2` |
+| unknown | subprocess fallback (set `LOOPER_HERMES_FALLBACK=0` to disable) | invokes argv directly |
+
+Extend the table by adding entries to `CLI_TO_HERMES_VENDOR` in
+`templates/hermes-runner.py`.
+
+### Schedule a loop
+
+The Hermes-native runner is designed to be dropped into a `hermes cron` job.
+Two patterns:
+
+**1. No-agent (recommended for a long-running pipeline)** — the script is
+the job; the runner is invoked directly on its schedule, and its stdout
+is delivered as the job's output:
+
+```bash
+# Symlink the runner into ~/.hermes/scripts/ so `hermes cron --script` accepts it
+mkdir -p ~/.hermes/scripts
+ln -sf /abs/path/to/looper-output/hermes-runner.py ~/.hermes/scripts/looper-runner.py
+
+hermes cron create \
+  --name "weekly-looper-pipeline" \
+  --schedule "0 9 * * 1" \
+  --script ~/.hermes/scripts/looper-runner.py \
+  --no-agent \
+  --workdir /abs/path/to/looper-output
+```
+
+**2. Agent-driven (a real Hermes LLM drives the loop)** — the script is
+invoked inside an agent context, with the loop's `RUN_IN_SESSION.md` pasted
+as the prompt. More flexible but more expensive:
+
+```bash
+hermes cron create \
+  --name "weekly-looper-pipeline" \
+  --schedule "0 9 * * 1" \
+  --prompt "$(cat /abs/path/to/looper-output/RUN_IN_SESSION.md)" \
+  --workdir /abs/path/to/looper-output
+```
+
+`hermes-runner.py` does not need a TTY (it does not run human checkpoints
+in v1). The upstream `run-loop.py` is the right choice for human-in-the-loop
+loops until a TTY-aware dispatcher lands.
+
 ## License
 
-MIT © Kevin Simback
+MIT © Kevin Simback (upstream) · MIT © alvroble (Hermes port additions)
