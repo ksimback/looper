@@ -184,6 +184,40 @@ class LooperTests(unittest.TestCase):
             review = (work / "loop-workspace" / "review-plan_gate-1.md").read_text(encoding="utf-8")
             self.assertIn("unparseable_judge_output", review)
 
+    def test_fixed_passes_does_not_bypass_failed_programmatic_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace("verdict_policy: revise_until_clean", "verdict_policy: fixed_passes")
+            loop_yaml = loop_yaml.replace("verdict_source: reviewer-1\n", "")
+            loop_yaml = loop_yaml.replace("        criteria:", "    criteria:")
+            fail_check = work / "fail_check.py"
+            fail_check.write_text("import sys\nsys.exit(9)\n", encoding="utf-8")
+            lines = []
+            for line in loop_yaml.splitlines():
+                if "check_contains.py" in line:
+                    lines.append(f'      check: ["{sys.executable}", "{fail_check.as_posix()}"]')
+                else:
+                    lines.append(line)
+            loop_yaml = "\n".join(lines) + "\n"
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertNotEqual(result.returncode, 0)
+            state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(state["status"], "passed")
+            self.assertIn(state["failure"], {"delivery_gate_max_revisions_reached", "no_progress_detected"})
+
     def test_session_prompt_command_renders_from_resolved_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
