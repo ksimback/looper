@@ -11,7 +11,7 @@ description: >
   plus portable loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
 disable-model-invocation: true
 argument-hint: "[target-dir]"
-allowed-tools: Write Bash(python3 *)
+allowed-tools: Write Bash
 ---
 
 # Looper
@@ -60,7 +60,7 @@ advanced external runner.
    - `loop-workspace/`
    - `README.md`
 10. After writing `loop.yaml`, run:
-   `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+   `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
    If `python3` is not available, try `python`.
 11. Ask whether the user wants to run the loop now in this session. If yes,
    follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
@@ -84,13 +84,13 @@ advanced external runner.
 ## Helper Scripts
 
 - Detect model CLIs:
-  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py detect-models --write`
+  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py detect-models --write`
 - Register a custom CLI:
-  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke <cmd> [args...]`
+  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke <cmd> [args...]`
 - Compile and render:
-  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
 - Render only the in-session handoff:
-  `python3 ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
+  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
 
 ## Confirmation Flow Preview
 

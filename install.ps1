@@ -8,9 +8,18 @@ $CommandsDir = Join-Path $ClaudeDir "commands"
 $SkillDir = Join-Path $SkillsDir "looper"
 $CommandSource = Join-Path $SkillDir "commands\looper.md"
 $CommandTarget = Join-Path $CommandsDir "looper.md"
+$VenvDir = Join-Path $SkillDir ".venv"
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git is required to install Looper. Install Git, then rerun this command."
+}
+
+$Python = Get-Command python -ErrorAction SilentlyContinue
+if (-not $Python) {
+    $Python = Get-Command py -ErrorAction SilentlyContinue
+}
+if (-not $Python) {
+    throw "Python 3 is required to install Looper. Install Python 3, then rerun this command."
 }
 
 New-Item -ItemType Directory -Force -Path $SkillsDir, $CommandsDir | Out-Null
@@ -33,6 +42,14 @@ if (-not (Test-Path $CommandSource)) {
 
 Copy-Item $CommandSource $CommandTarget -Force
 
+if (-not (Test-Path $VenvDir)) {
+    & $Python.Source -m venv $VenvDir
+}
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+& $VenvPython -m pip install --upgrade pip | Out-Null
+& $VenvPython -m pip install "PyYAML>=6.0" | Out-Null
+
 Write-Host ""
 Write-Host "Looper installed."
+Write-Host "Python dependencies installed in $VenvDir."
 Write-Host "Restart Claude Code, then run /looper."

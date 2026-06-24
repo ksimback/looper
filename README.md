@@ -169,7 +169,9 @@ Then, in Claude Code:
 ```
 
 Looper interviews you, writes the artifacts into a folder called `looper-output`,
-and shows you an ASCII flow preview to confirm before anything is finalized. It
+and shows you an ASCII flow preview to confirm before anything is finalized. The
+installer also creates a private `.venv` inside the skill directory and installs
+`PyYAML`, which the helper compiler needs to read `loop.yaml`. It
 then offers to run the loop right there in the same Claude Code session.
 
 If you want a different folder name, pass it after `/looper`, for example
