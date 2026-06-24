@@ -8,9 +8,15 @@ commands_dir="${claude_dir}/commands"
 skill_dir="${skills_dir}/looper"
 command_source="${skill_dir}/commands/looper.md"
 command_target="${commands_dir}/looper.md"
+venv_dir="${skill_dir}/.venv"
 
 if ! command -v git >/dev/null 2>&1; then
   echo "Git is required to install Looper. Install Git, then rerun this command." >&2
+  exit 1
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python 3 is required to install Looper. Install Python 3, then rerun this command." >&2
   exit 1
 fi
 
@@ -36,6 +42,13 @@ fi
 
 cp "${command_source}" "${command_target}"
 
+if [ ! -d "${venv_dir}" ]; then
+  python3 -m venv "${venv_dir}"
+fi
+"${venv_dir}/bin/python" -m pip install --upgrade pip >/dev/null
+"${venv_dir}/bin/python" -m pip install "PyYAML>=6.0" >/dev/null
+
 echo
 echo "Looper installed."
+echo "Python dependencies installed in ${venv_dir}."
 echo "Restart Claude Code, then run /looper."
