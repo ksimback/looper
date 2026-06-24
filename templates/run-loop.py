@@ -464,9 +464,12 @@ class Runner:
                     failures.extend(verdict.get("blocking_issues") or ["Judge requested revision"])
 
             if policy == "fixed_passes":
-                if revision >= max_revisions:
+                if failures:
+                    pass
+                elif revision >= max_revisions:
                     return True
-                failures.append("fixed_passes reviewer pass")
+                else:
+                    failures.append("fixed_passes reviewer pass")
 
             if not failures:
                 self.save_state(status=f"{gate_name}_passed", **{gate_name: {"passed_at": utc_now()}})
