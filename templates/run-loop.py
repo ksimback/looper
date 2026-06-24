@@ -225,6 +225,32 @@ class Runner:
                 redactions.extend(entry.get("redact", []))
         return redactions or [".env", ".env.*", "secrets/**", "**/*.key"]
 
+    def redact_prompt_for_member(self, member_id: str, prompt: str) -> str:
+        redactions = self.redactions_for(member_id)
+        redacted = prompt
+        for pattern in redactions:
+            paths = list(self.base_dir.glob(pattern))
+            if pattern.endswith("/**"):
+                root = self.base_dir / pattern[:-3]
+                if root.exists():
+                    paths.extend(root.rglob("*"))
+            for path in paths:
+                if not path.is_file():
+                    continue
+                try:
+                    secret_text = path.read_text(encoding="utf-8")
+                except UnicodeDecodeError:
+                    continue
+                if not secret_text.strip() or len(secret_text) > 1_000_000:
+                    continue
+                marker = f"[redacted:{path.relative_to(self.base_dir).as_posix()}]"
+                redacted = redacted.replace(secret_text, marker)
+                for line in secret_text.splitlines():
+                    stripped = line.strip()
+                    if len(stripped) >= 8:
+                        redacted = redacted.replace(stripped, marker)
+        return redacted
+
     def ensure_consent(self, member_id: str) -> None:
         member = self.member(member_id)
         if member.get("local"):
@@ -371,7 +397,10 @@ class Runner:
         self.ensure_consent(member_id)
         output = call_model(
             self.member(member_id),
-            self.judge_prompt(gate_name, artifact_label, artifact_text, criteria),
+            self.redact_prompt_for_member(
+                member_id,
+                self.judge_prompt(gate_name, artifact_label, artifact_text, criteria),
+            ),
             self.base_dir,
         )
         verdict = parse_judge_output(output)
@@ -397,6 +426,7 @@ class Runner:
                 "Do not return a verdict.\n\n"
                 f"Gate: {gate_name}\nArtifact: {artifact_label}\n\n{artifact_text}\n"
             )
+            prompt = self.redact_prompt_for_member(member_id, prompt)
             notes.append(f"## {member_id}\n\n{call_model(member, prompt, self.base_dir)}")
             self.append_log("reviewer_notes", gate=gate_name, member=member_id)
         return notes
