@@ -8,6 +8,9 @@ Use this when setting gates, iteration caps, budgets, and stop conditions.
 - `gates.*.max_revisions`
 - `loop_control.no_progress.max_stalled_iterations`
 - At least one wall-clock, token, or USD budget cap when external models run.
+  The generated Python runner enforces wall-clock caps directly; token and USD
+  caps are advisory unless the chosen model CLI exposes accounting that the
+  loop operator wires in separately.
 - A stop condition that describes success.
 - A stop condition that describes no-progress or repeated failure.
 
