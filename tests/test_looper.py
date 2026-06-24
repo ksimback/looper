@@ -267,6 +267,15 @@ class LooperTests(unittest.TestCase):
             self.assertNotIn("SUPERSECRET-LOOPER-VALUE", judge_prompt)
             self.assertIn("[redacted:inputs/secret.txt]", judge_prompt)
 
+    def test_cli_errors_are_clean_for_missing_files_and_runner_help(self) -> None:
+        result = run_cmd([sys.executable, str(LOOPER), "compile", "does-not-exist.yaml"], ROOT)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("looper: error: Could not read", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+
+        help_result = run_cmd([sys.executable, str(RUNNER_TEMPLATE), "--help"], ROOT)
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn("Run a compiled Looper loop", help_result.stdout)
 
     def test_session_prompt_command_renders_from_resolved_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
