@@ -392,7 +392,7 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
 
     resolved = {
         "$schema": "https://github.com/ksimback/looper/schema/loop.resolved.v1.json",
-        "compiled_at": _dt.datetime.now(_dt.UTC).replace(microsecond=0).isoformat(),
+        "compiled_at": _dt.datetime.now(_dt.timezone.utc).replace(microsecond=0).isoformat(),
         "source": str(source_path),
         **spec,
         "criteria_by_id": criteria,
