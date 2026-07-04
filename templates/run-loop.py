@@ -11,6 +11,7 @@ import argparse
 import datetime as _dt
 import fnmatch
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -22,9 +23,33 @@ from typing import Any
 PASS = "pass"
 REVISE = "revise"
 
+DEFAULT_REDACTIONS = [".env", ".env.*", "secrets/**", "**/*.key"]
+
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv"}
+
 
 class RunnerError(RuntimeError):
     pass
+
+
+def ask(prompt: str) -> str:
+    try:
+        return input(prompt)
+    except EOFError as exc:
+        raise RunnerError(
+            "Interactive input required but stdin is closed; run in an interactive terminal"
+        ) from exc
+
+
+def spec_get(data: dict[str, Any], *keys: str) -> Any:
+    node: Any = data
+    trail: list[str] = []
+    for key in keys:
+        trail.append(key)
+        if not isinstance(node, dict) or key not in node:
+            raise RunnerError(f"loop.resolved.json is missing required field: {'.'.join(trail)}")
+        node = node[key]
+    return node
 
 
 def utc_now() -> str:
@@ -62,15 +87,31 @@ def ensure_argv(value: Any, field: str) -> list[str]:
 
 def relative_to_base(path_text: str, base_dir: Path) -> Path:
     path = Path(path_text)
-    return path if path.is_absolute() else base_dir / path
+    resolved = path if path.is_absolute() else base_dir / path
+    try:
+        resolved.resolve().relative_to(base_dir.resolve())
+    except ValueError:
+        raise RunnerError(
+            f"Path {path_text!r} escapes the loop directory {base_dir}; "
+            "workspace and context paths must stay inside the loop directory"
+        ) from None
+    return resolved
 
 
 def is_redacted(path: Path, base_dir: Path, globs: list[str]) -> bool:
     try:
-        rel = path.relative_to(base_dir).as_posix()
+        rel = path.resolve().relative_to(base_dir.resolve()).as_posix()
     except ValueError:
         rel = path.name
-    return any(fnmatch.fnmatch(rel, pattern) for pattern in globs)
+    # Match each pattern against the relative path and every path suffix so
+    # bare patterns like ".env" also cover nested files like "config/.env".
+    parts = rel.split("/")
+    suffixes = {"/".join(parts[i:]) for i in range(len(parts))}
+    for pattern in globs:
+        normalized = pattern[3:] if pattern.startswith("**/") else pattern
+        if any(fnmatch.fnmatch(candidate, normalized) for candidate in suffixes):
+            return True
+    return False
 
 
 def run_argv(
@@ -86,7 +127,8 @@ def run_argv(
             input=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             cwd=str(cwd),
             timeout=timeout_sec,
             check=False,
@@ -109,12 +151,33 @@ def call_model(member: dict[str, Any], prompt: str, base_dir: Path) -> str:
     return result.stdout.strip()
 
 
+def _judge_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    if fenced:
+        candidates.append(fenced.group(1).strip())
+    stripped = text.strip()
+    candidates.append(stripped)
+    brace = stripped.find("{")
+    if brace > 0:
+        candidates.append(stripped[brace:])
+    return [candidate for candidate in candidates if candidate]
+
+
 def parse_judge_output(text: str) -> dict[str, Any]:
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidate = fenced.group(1) if fenced else text.strip()
-    try:
-        parsed = json.loads(candidate)
-    except json.JSONDecodeError:
+    parsed: Any = None
+    for candidate in _judge_candidates(text):
+        try:
+            parsed = json.loads(candidate)
+            break
+        except json.JSONDecodeError:
+            try:
+                # Tolerate prose after the JSON object (e.g. a trailing summary).
+                parsed, _ = json.JSONDecoder().raw_decode(candidate)
+                break
+            except json.JSONDecodeError:
+                continue
+    if parsed is None:
         return {
             "verdict": REVISE,
             "blocking_issues": ["Judge output was not parseable JSON."],
@@ -145,13 +208,16 @@ class Runner:
         self.spec_path = spec_path.resolve()
         self.base_dir = self.spec_path.parent
         self.spec = load_json(self.spec_path)
-        self.workspace = relative_to_base(self.spec["workspace"]["dir"], self.base_dir)
+        self.workspace = relative_to_base(str(spec_get(self.spec, "workspace", "dir")), self.base_dir)
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.observability = self.spec.get("observability", {})
         self.run_log_path = self.workspace / self.observability.get("run_log", "run-log.md")
         self.state_path = self.workspace / self.observability.get("state_file", "state.json")
         self.state = self.load_state()
+        # Wall-clock budget accrues across resumed runs.
+        self.prior_elapsed = float(self.state.get("wall_clock_used_sec", 0) or 0)
         self.started = time.monotonic()
+        self.stop_reason: str | None = None
 
     def load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
@@ -164,9 +230,13 @@ class Runner:
             "consent": {},
         }
 
+    def elapsed_sec(self) -> float:
+        return self.prior_elapsed + (time.monotonic() - self.started)
+
     def save_state(self, **updates: Any) -> None:
         self.state.update(updates)
         self.state["updated_at"] = utc_now()
+        self.state["wall_clock_used_sec"] = round(self.elapsed_sec(), 1)
         write_json(self.state_path, self.state)
 
     def append_log(self, event: str, **fields: Any) -> None:
@@ -180,7 +250,7 @@ class Runner:
         wall_clock_min = budget.get("wall_clock_min")
         if wall_clock_min is None:
             return
-        if time.monotonic() - self.started > float(wall_clock_min) * 60:
+        if self.elapsed_sec() > float(wall_clock_min) * 60:
             self.save_state(status="failed", failure="wall_clock_budget_exceeded")
             self.append_log("stop", reason="wall_clock_budget_exceeded")
             raise RunnerError("Wall-clock budget exceeded")
@@ -208,75 +278,96 @@ class Runner:
             return False
         self.append_log("no_progress_detected", gate=gate_name, count=count, failures=failures)
         if config.get("action", "stop") == "human_checkpoint":
-            answer = input("No-progress detected. Type 'continue' to allow one more revision: ").strip().lower()
+            answer = ask("No-progress detected. Type 'continue' to allow one more revision: ").strip().lower()
             if answer == "continue":
                 progress["count"] = 0
                 self.save_state(no_progress=progress)
                 self.append_log("no_progress_override", gate=gate_name)
                 return False
+        self.stop_reason = "no_progress_detected"
         self.save_state(status="failed", failure="no_progress_detected", blocking_issues=failures)
         return True
 
     def criteria(self, ids: list[str]) -> list[dict[str, Any]]:
         by_id = self.spec.get("criteria_by_id", {})
+        missing = [item for item in ids if item not in by_id]
+        if missing:
+            raise RunnerError(f"Gate references unknown criteria: {', '.join(missing)}")
         return [by_id[item] for item in ids]
 
     def member(self, member_id: str) -> dict[str, Any]:
-        return self.spec["council_by_id"][member_id]
+        by_id = spec_get(self.spec, "council_by_id")
+        if member_id not in by_id:
+            raise RunnerError(f"Unknown council member: {member_id}")
+        return by_id[member_id]
 
     def redactions_for(self, member_id: str) -> list[str]:
-        redactions: list[str] = []
+        # Defaults always apply; configured egress redactions extend them.
+        redactions = list(DEFAULT_REDACTIONS)
         for entry in self.spec.get("privacy", {}).get("egress", []):
             if entry.get("to") == member_id:
-                redactions.extend(entry.get("redact", []))
-        return redactions or [".env", ".env.*", "secrets/**", "**/*.key"]
+                for pattern in entry.get("redact", []):
+                    if pattern not in redactions:
+                        redactions.append(pattern)
+        return redactions
+
+    def all_redaction_globs(self) -> list[str]:
+        globs = list(DEFAULT_REDACTIONS)
+        for entry in self.spec.get("privacy", {}).get("egress", []):
+            for pattern in entry.get("redact", []):
+                if pattern not in globs:
+                    globs.append(pattern)
+        return globs
+
+    def iter_redaction_files(self, globs: list[str]):
+        for root, dirs, files in os.walk(self.base_dir):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for name in files:
+                path = Path(root) / name
+                if is_redacted(path, self.base_dir, globs):
+                    yield path
 
     def redact_prompt_for_member(self, member_id: str, prompt: str) -> str:
-        redactions = self.redactions_for(member_id)
         redacted = prompt
-        for pattern in redactions:
-            paths = list(self.base_dir.glob(pattern))
-            if pattern.endswith("/**"):
-                root = self.base_dir / pattern[:-3]
-                if root.exists():
-                    paths.extend(root.rglob("*"))
-            for path in paths:
-                if not path.is_file():
-                    continue
-                try:
-                    secret_text = path.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
-                    continue
-                if not secret_text.strip() or len(secret_text) > 1_000_000:
-                    continue
-                marker = f"[redacted:{path.relative_to(self.base_dir).as_posix()}]"
-                redacted = redacted.replace(secret_text, marker)
-                for line in secret_text.splitlines():
-                    stripped = line.strip()
-                    if len(stripped) >= 8:
-                        redacted = redacted.replace(stripped, marker)
+        for path in self.iter_redaction_files(self.redactions_for(member_id)):
+            try:
+                secret_text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if not secret_text.strip() or len(secret_text) > 1_000_000:
+                continue
+            marker = f"[redacted:{path.relative_to(self.base_dir).as_posix()}]"
+            redacted = redacted.replace(secret_text, marker)
+            for line in secret_text.splitlines():
+                stripped = line.strip()
+                if len(stripped) >= 8:
+                    redacted = redacted.replace(stripped, marker)
         return redacted
 
     def ensure_consent(self, member_id: str) -> None:
         member = self.member(member_id)
         if member.get("local"):
             return
+        if self.state.get("consent", {}).get(member_id):
+            return
         matching = [
             entry
             for entry in self.spec.get("privacy", {}).get("egress", [])
-            if entry.get("to") == member_id and entry.get("consent") == "required"
+            if entry.get("to") == member_id
         ]
-        if not matching:
-            return
-        if self.state.get("consent", {}).get(member_id):
+        # Consent fails closed: a non-local member always needs consent unless
+        # every egress entry for it explicitly pre-grants with consent: granted.
+        if matching and all(entry.get("consent") == "granted" for entry in matching):
             return
         sends = sorted({item for entry in matching for item in entry.get("sends", [])})
-        redactions = sorted({item for entry in matching for item in entry.get("redact", [])})
+        redactions = self.redactions_for(member_id)
         print()
-        print(f"Looper is about to send {', '.join(sends) or 'context'} to {member_id}.")
+        print(f"Looper is about to send {', '.join(sends) or 'loop artifacts'} to {member_id}.")
         print(f"CLI: {member.get('cli')} / model: {member.get('model', 'default')}")
-        print(f"Redactions: {', '.join(redactions) or '(none)'}")
-        answer = input("Type 'yes' to consent to this first send: ").strip().lower()
+        print(f"Redactions: {', '.join(redactions)}")
+        if not matching:
+            print("No privacy.egress entry covers this member; consent is required by default.")
+        answer = ask("Type 'yes' to consent to this first send: ").strip().lower()
         if answer != "yes":
             self.save_state(status="blocked", failure=f"consent_refused:{member_id}")
             raise RunnerError(f"Consent refused for {member_id}")
@@ -285,13 +376,19 @@ class Runner:
         self.save_state(consent=consent)
 
     def gather_context(self) -> str:
-        goal = self.spec["goal"]
+        goal = spec_get(self.spec, "goal")
+        redaction_globs = self.all_redaction_globs()
         chunks: list[str] = []
-        for index, source in enumerate(goal.get("context_sources", []), start=1):
+        for index, source in enumerate(goal.get("context_sources", []) or [], start=1):
             self.enforce_wall_clock()
             if "file" in source:
-                path = relative_to_base(source["file"], self.base_dir)
-                if is_redacted(path, self.base_dir, [".env", ".env.*", "secrets/**", "**/*.key"]):
+                try:
+                    path = relative_to_base(source["file"], self.base_dir)
+                except RunnerError:
+                    chunks.append(f"## Context source {index}: {source['file']}\n[blocked: outside loop directory]\n")
+                    self.append_log("context", source=source["file"], status="blocked_outside_base")
+                    continue
+                if is_redacted(path, self.base_dir, redaction_globs):
                     chunks.append(f"## Context source {index}: {source['file']}\n[redacted]\n")
                     self.append_log("context", source=source["file"], status="redacted")
                 elif path.exists():
@@ -313,19 +410,20 @@ class Runner:
         return context
 
     def host_prompt(self, phase: str, artifact: str = "", review: str = "") -> str:
-        goal = self.spec["goal"]
+        statement = spec_get(self.spec, "goal", "statement")
+        done = spec_get(self.spec, "goal").get("definition_of_done", "")
         if phase == "plan":
             return (
                 "Draft plan.md for this loop.\n\n"
-                f"Goal:\n{goal['statement']}\n\n"
-                f"Definition of done:\n{goal['definition_of_done']}\n\n"
+                f"Goal:\n{statement}\n\n"
+                f"Definition of done:\n{done}\n\n"
                 f"Context:\n{(self.workspace / 'context.md').read_text(encoding='utf-8')}\n"
             )
         if phase == "delivery":
             return (
                 "Write the next delivery artifact for this loop.\n\n"
-                f"Goal:\n{goal['statement']}\n\n"
-                f"Definition of done:\n{goal['definition_of_done']}\n\n"
+                f"Goal:\n{statement}\n\n"
+                f"Definition of done:\n{done}\n\n"
                 f"Plan:\n{(self.workspace / 'plan.md').read_text(encoding='utf-8')}\n"
             )
         if phase == "revise":
@@ -338,7 +436,7 @@ class Runner:
     def run_host(self, phase: str, target: Path, artifact: str = "", review: str = "") -> None:
         self.enforce_wall_clock()
         self.append_log("host_start", phase=phase, target=target.name)
-        output = call_model(self.spec["host"], self.host_prompt(phase, artifact, review), self.base_dir)
+        output = call_model(spec_get(self.spec, "host"), self.host_prompt(phase, artifact, review), self.base_dir)
         write_text(target, output)
         self.append_log("host_done", phase=phase, target=target.name)
 
@@ -440,7 +538,7 @@ class Runner:
     def human_check(self, criterion: dict[str, Any]) -> dict[str, Any]:
         print()
         print(criterion["prompt"])
-        answer = input("Type 'pass' to approve, anything else to request revision: ").strip().lower()
+        answer = ask("Type 'pass' to approve, anything else to request revision: ").strip().lower()
         return {
             "id": criterion["id"],
             "type": "human",
@@ -449,8 +547,8 @@ class Runner:
         }
 
     def run_gate(self, gate_name: str, artifact_path: Path, artifact_label: str) -> bool:
-        gate = self.spec["gates"][gate_name]
-        criteria = self.criteria(gate.get("criteria", []))
+        gate = spec_get(self.spec, "gates", gate_name)
+        criteria = self.criteria(gate.get("criteria", []) or [])
         max_revisions = int(gate.get("max_revisions", 0))
         revision = 0
         self.append_log("gate_start", gate=gate_name, artifact=artifact_label)
@@ -486,7 +584,7 @@ class Runner:
             if policy == "revise_until_clean" and not failures:
                 source = gate.get("verdict_source")
                 if source == "human":
-                    answer = input(f"Type 'pass' if {artifact_label} is clean: ").strip().lower()
+                    answer = ask(f"Type 'pass' if {artifact_label} is clean: ").strip().lower()
                     verdict = {
                         "verdict": PASS if answer == PASS else REVISE,
                         "blocking_issues": [] if answer == PASS else ["human requested revision"],
@@ -499,12 +597,16 @@ class Runner:
                 if verdict.get("verdict") == REVISE:
                     failures.extend(verdict.get("blocking_issues") or ["Judge requested revision"])
 
+            synthetic_pass = False
             if policy == "fixed_passes":
                 if failures:
                     pass
                 elif revision >= max_revisions:
                     return True
                 else:
+                    # Not a real failure: it only forces another reviewer pass,
+                    # so it must not feed the no-progress stall detector.
+                    synthetic_pass = True
                     failures.append("fixed_passes reviewer pass")
 
             if not failures:
@@ -517,7 +619,7 @@ class Runner:
             write_text(review_path, review_text)
             self.append_log("gate_blocked", gate=gate_name, review=review_path.name, failures=failures)
 
-            if self.no_progress_reached(gate_name, failures):
+            if not synthetic_pass and self.no_progress_reached(gate_name, failures):
                 return False
 
             if revision >= max_revisions:
@@ -530,7 +632,7 @@ class Runner:
                 return False
 
             revised = call_model(
-                self.spec["host"],
+                spec_get(self.spec, "host"),
                 self.host_prompt("revise", artifact_text, review_text),
                 self.base_dir,
             )
@@ -539,8 +641,33 @@ class Runner:
             self.save_state(status=f"{gate_name}_revision_{revision}", last_review=str(review_path))
             self.append_log("revision", gate=gate_name, revision=revision, artifact=artifact_label)
 
+    def human_checkpoint(self, name: str) -> None:
+        checkpoints = self.spec.get("loop_control", {}).get("human_checkpoints", []) or []
+        if name not in checkpoints:
+            return
+        answer = ask(f"Human checkpoint {name!r}: type 'continue' to proceed: ").strip().lower()
+        if answer != "continue":
+            self.save_state(status="blocked", failure=f"human_checkpoint:{name}")
+            self.append_log("stop", reason=f"human_checkpoint:{name}")
+            raise RunnerError(f"Stopped at human checkpoint {name}")
+        self.append_log("human_checkpoint_passed", checkpoint=name)
+
     def run(self) -> int:
-        self.save_state(status="running")
+        try:
+            return self._run()
+        except RunnerError as exc:
+            if self.state.get("status") not in {"failed", "blocked"}:
+                self.save_state(status="failed", failure=str(exc))
+            self.append_log("run_error", error=str(exc))
+            raise
+
+    def _run(self) -> int:
+        if self.state.get("status") == "passed":
+            print("Looper run already passed. Delete the workspace state to re-run.")
+            return 0
+        # Resuming: stale stall counts from an interrupted run must not
+        # insta-trip the detector on the first new gate round.
+        self.save_state(status="running", no_progress={"count": 0, "signature": "", "gate": ""})
         self.append_log("run_start", spec=str(self.spec_path))
         self.gather_context()
 
@@ -549,18 +676,25 @@ class Runner:
             self.run_host("plan", plan_path)
         if not self.run_gate("plan_gate", plan_path, "plan.md"):
             return 1
+        self.human_checkpoint("after_plan")
 
-        max_iterations = int(self.spec["loop_control"]["max_iterations"])
-        for iteration in range(1, max_iterations + 1):
+        max_iterations = int(spec_get(self.spec, "loop_control", "max_iterations"))
+        start_iteration = max(1, int(self.state.get("iteration", 0) or 0))
+        for iteration in range(start_iteration, max_iterations + 1):
             self.enforce_wall_clock()
             self.save_state(status="delivery", iteration=iteration)
             delivery_path = self.workspace / f"delivery-{iteration}.md"
-            self.run_host("delivery", delivery_path)
+            if not delivery_path.exists():
+                self.run_host("delivery", delivery_path)
             if self.run_gate("delivery_gate", delivery_path, delivery_path.name):
                 self.save_state(status="passed", final_delivery=str(delivery_path), completed_at=utc_now())
                 self.append_log("run_passed", final_delivery=str(delivery_path))
                 print(f"Looper run passed. Final delivery: {delivery_path}")
                 return 0
+            if self.stop_reason:
+                # A stop-class failure (e.g. no-progress with action: stop)
+                # ends the whole run, not just this delivery attempt.
+                return 1
 
         self.save_state(status="failed", failure="max_iterations_reached")
         self.append_log("stop", reason="max_iterations_reached")
