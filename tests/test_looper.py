@@ -201,7 +201,7 @@ class LooperTests(unittest.TestCase):
             lines = []
             for line in loop_yaml.splitlines():
                 if "check_contains.py" in line:
-                    lines.append(f'      check: ["{sys.executable}", "{fail_check.as_posix()}"]')
+                    lines.append(f'      check: ["{Path(sys.executable).as_posix()}", "{fail_check.as_posix()}"]')
                 else:
                     lines.append(line)
             loop_yaml = "\n".join(lines) + "\n"
