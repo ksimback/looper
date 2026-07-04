@@ -16,18 +16,25 @@ RUNNER_TEMPLATE = ROOT / "templates" / "run-loop.py"
 FIXTURES = ROOT / "tests" / "fixtures"
 
 
-def run_cmd(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def run_cmd(argv: list[str], cwd: Path, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         argv,
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        input=stdin,
         check=False,
     )
 
 
-def write_loop_yaml(path: Path, *, judge_role: str = "judge", judge_script: Path | None = None) -> None:
+def write_loop_yaml(
+    path: Path,
+    *,
+    judge_role: str = "judge",
+    judge_script: Path | None = None,
+    judge_local: bool = True,
+) -> None:
     judge_script = judge_script or (FIXTURES / "fake_judge.py")
     judge_state = path.parent / "judge-state.json"
     python = Path(sys.executable).as_posix()
@@ -69,7 +76,7 @@ def write_loop_yaml(path: Path, *, judge_role: str = "judge", judge_script: Path
                 invoke: ["{python}", "{judge_script.as_posix()}", "{judge_state.as_posix()}", "1"]
                 timeout_sec: 30
                 scope: [plan, delivery]
-                local: true
+                local: {str(judge_local).lower()}
 
             gates:
               plan_gate:
@@ -266,6 +273,153 @@ class LooperTests(unittest.TestCase):
             judge_prompt = capture_file.read_text(encoding="utf-8")
             self.assertNotIn("SUPERSECRET-LOOPER-VALUE", judge_prompt)
             self.assertIn("[redacted:inputs/secret.txt]", judge_prompt)
+
+    def test_fixed_passes_reviewer_gate_completes_cleanly(self) -> None:
+        # Regression: the synthetic "fixed_passes reviewer pass" marker used to
+        # feed the no-progress detector and fail the run before its passes
+        # completed.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace("verdict_policy: revise_until_clean", "verdict_policy: fixed_passes")
+            loop_yaml = loop_yaml.replace("verdict_source: reviewer-1\n", "")
+            loop_yaml = loop_yaml.replace("        criteria:", "    criteria:")
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "passed")
+
+    def test_judge_output_with_nested_json_parses_as_pass(self) -> None:
+        # Regression: the old fence regex truncated nested objects at the first
+        # closing brace, degrading every structured verdict to revise.
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("run_loop_template", RUNNER_TEMPLATE)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        text = (
+            "Here is my verdict.\n"
+            "```json\n"
+            '{"verdict": "pass", "blocking_issues": [], "confidence": 0.9,'
+            ' "notes": "ok", "meta": {"scores": {"clarity": 5}}}\n'
+            "```\n"
+            "Trailing commentary."
+        )
+        verdict = module.parse_judge_output(text)
+        self.assertEqual(verdict["verdict"], "pass")
+        self.assertNotIn("warning", verdict)
+
+    def test_consent_fails_closed_for_cross_vendor_member_without_egress(self) -> None:
+        # Regression: a non-local member with no privacy.egress entry used to be
+        # sent artifacts with no consent prompt at all.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml", judge_local=False)
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+
+            # Closed stdin means consent cannot be granted: refuse and stop.
+            refused = run_cmd([sys.executable, "run-loop.py"], work, stdin="")
+            self.assertEqual(refused.returncode, 2, refused.stderr + refused.stdout)
+            self.assertFalse((work / "judge-state.json").exists(), "judge was invoked without consent")
+            state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(state["status"], "passed")
+
+            # Explicit consent lets the run proceed to completion.
+            shutil.rmtree(work / "loop-workspace")
+            granted = run_cmd([sys.executable, "run-loop.py"], work, stdin="yes\n")
+            self.assertEqual(granted.returncode, 0, granted.stderr + granted.stdout)
+            self.assertTrue((work / "judge-state.json").exists())
+
+    def test_nested_env_file_redacted_from_context_and_judge(self) -> None:
+        # Regression: bare ".env" globs only matched top-level files, and
+        # context gathering ignored configured redactions entirely.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "config").mkdir()
+            (work / "config" / ".env").write_text("NESTED-LOOPER-SECRET-VALUE=1\n", encoding="utf-8")
+            capture_file = work / "judge-stdin.txt"
+            judge_script = work / "spy_judge.py"
+            judge_script.write_text(
+                "import json\n"
+                "import pathlib\n"
+                "import sys\n"
+                "\n"
+                "prompt = sys.stdin.read()\n"
+                f"capture = pathlib.Path({str(capture_file)!r})\n"
+                "previous = capture.read_text(encoding='utf-8') if capture.exists() else ''\n"
+                "capture.write_text(previous + '\\n---CALL---\\n' + prompt, encoding='utf-8')\n"
+                "print('```json')\n"
+                "print(json.dumps({'verdict': 'pass', 'blocking_issues': [], 'confidence': 1.0, 'notes': 'ok'}))\n"
+                "print('```')\n",
+                encoding="utf-8",
+            )
+            write_loop_yaml(work / "loop.yaml", judge_script=judge_script)
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "- file: ./inputs/process-notes.md",
+                "- file: ./inputs/process-notes.md\n    - file: ./config/.env",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            context = (work / "loop-workspace" / "context.md").read_text(encoding="utf-8")
+            self.assertNotIn("NESTED-LOOPER-SECRET-VALUE", context)
+            self.assertIn("[redacted]", context)
+            judge_prompt = capture_file.read_text(encoding="utf-8")
+            self.assertNotIn("NESTED-LOOPER-SECRET-VALUE", judge_prompt)
+
+    def test_runner_rejects_workspace_outside_loop_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "loop"
+            work.mkdir()
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            resolved = json.loads((work / "loop.resolved.json").read_text(encoding="utf-8"))
+            resolved["workspace"]["dir"] = "../escaped-workspace"
+            (work / "loop.resolved.json").write_text(json.dumps(resolved), encoding="utf-8")
+
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("escapes the loop directory", result.stderr)
+            self.assertFalse((Path(tmp) / "escaped-workspace").exists())
 
     def test_cli_errors_are_clean_for_missing_files_and_runner_help(self) -> None:
         result = run_cmd([sys.executable, str(LOOPER), "compile", "does-not-exist.yaml"], ROOT)
