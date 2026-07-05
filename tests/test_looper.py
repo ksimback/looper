@@ -431,6 +431,148 @@ class LooperTests(unittest.TestCase):
         self.assertEqual(help_result.returncode, 0)
         self.assertIn("Run a compiled Looper loop", help_result.stdout)
 
+    def test_compile_rejects_invalid_specs(self) -> None:
+        python = Path(sys.executable).as_posix()
+        host_invoke = f'invoke: ["{python}", "{(FIXTURES / "fake_host.py").as_posix()}"]'
+        duplicate_member = (
+            "  - id: reviewer-1\n"
+            "    role: judge\n"
+            "    cli: fake-judge\n"
+            "    model: fixture\n"
+            '    invoke: ["echo"]\n'
+            "    timeout_sec: 30\n"
+        )
+        cases = [
+            ("empty argv", host_invoke, "invoke: []", "must not be empty"),
+            ("negative budget", "wall_clock_min: 5", "wall_clock_min: -5", "positive number"),
+            ("duplicate council id", "\ngates:", f"\n{duplicate_member}\ngates:", "Duplicate council member id"),
+            (
+                "verdict_source not a gate member",
+                "members: [reviewer-1]",
+                "members: []",
+                "must also be listed",
+            ),
+            ("workspace escape", "dir: ./loop-workspace", "dir: ../escape", "relative path inside the loop directory"),
+            (
+                "context path traversal",
+                "- file: ./inputs/process-notes.md",
+                "- file: ../../outside.md",
+                "relative path inside the loop directory",
+            ),
+            (
+                "context source with file and cmd",
+                "- file: ./inputs/process-notes.md",
+                '- file: ./inputs/process-notes.md\n      cmd: ["ls"]',
+                "exactly one of file or cmd",
+            ),
+        ]
+        for label, old, new, expected in cases:
+            with self.subTest(label):
+                with tempfile.TemporaryDirectory() as tmp:
+                    work = Path(tmp)
+                    (work / "inputs").mkdir()
+                    (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+                    write_loop_yaml(work / "loop.yaml")
+                    loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+                    mutated = loop_yaml.replace(old, new, 1)
+                    self.assertNotEqual(mutated, loop_yaml, f"mutation for {label} did not apply")
+                    (work / "loop.yaml").write_text(mutated, encoding="utf-8")
+                    result = run_cmd([sys.executable, str(LOOPER), "compile", "loop.yaml"], work)
+                    self.assertEqual(result.returncode, 2, f"{label}: {result.stderr}")
+                    self.assertIn(expected, result.stderr, label)
+                    self.assertNotIn("Traceback", result.stderr, label)
+
+    def test_compile_defaults_null_fields_and_timeouts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            python = Path(sys.executable).as_posix()
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "- file: ./inputs/process-notes.md",
+                f'- file: ./inputs/process-notes.md\n    - cmd: ["{python}", "-c", "print(1)"]',
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            resolved = json.loads((work / "loop.resolved.json").read_text(encoding="utf-8"))
+            self.assertEqual(resolved["goal"]["context_sources"][1]["timeout_sec"], 60)
+            self.assertEqual(resolved["criteria_by_id"]["has-owner"]["timeout_sec"], 300)
+
+            # A bare context_sources: key (YAML null) must compile, not crash.
+            bare = (work / "loop.yaml").read_text(encoding="utf-8")
+            head, _, tail = bare.partition("  context_sources:")
+            _, _, rest = tail.partition("  definition_of_done:")
+            (work / "loop.yaml").write_text(
+                head + "  context_sources:\n  definition_of_done:" + rest, encoding="utf-8"
+            )
+            result = run_cmd([sys.executable, str(LOOPER), "compile", "loop.yaml"], work)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_session_prompt_tolerates_utf8_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            resolved_path = work / "loop.resolved.json"
+            resolved_path.write_bytes(b"\xef\xbb\xbf" + resolved_path.read_bytes())
+            rendered = run_cmd(
+                [sys.executable, str(LOOPER), "session-prompt", "loop.resolved.json", "--out", "RUN.md"],
+                work,
+            )
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+
+    def test_register_model_rejects_secret_material(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = Path(tmp) / "models.json"
+            refused = run_cmd(
+                [
+                    sys.executable,
+                    str(LOOPER),
+                    "register-model",
+                    "leaky",
+                    "--invoke",
+                    "llm",
+                    "api_key=sk-abcdefghijklmnopqrstuvwx",
+                    "--registry",
+                    str(registry),
+                ],
+                Path(tmp),
+            )
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn("must never store secrets", refused.stderr)
+            self.assertFalse(registry.exists())
+
+            clean = run_cmd(
+                [
+                    sys.executable,
+                    str(LOOPER),
+                    "register-model",
+                    "mycli",
+                    "--invoke",
+                    "mycli -p",
+                    "--registry",
+                    str(registry),
+                ],
+                Path(tmp),
+            )
+            self.assertEqual(clean.returncode, 0, clean.stderr)
+            data = json.loads(registry.read_text(encoding="utf-8"))
+            self.assertEqual(data["mycli"]["invoke"], ["mycli", "-p"])
+
     def test_session_prompt_command_renders_from_resolved_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)

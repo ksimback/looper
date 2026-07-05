@@ -3,7 +3,7 @@
   "$id": "https://github.com/ksimback/looper/schema/loop.v1.json",
   "title": "Looper authoring spec v1",
   "type": "object",
-  "required": ["version", "goal", "host", "gates", "loop_control", "workspace"],
+  "required": ["version", "goal", "host", "gates", "loop_control"],
   "properties": {
     "version": { "const": 1 },
     "meta": {
@@ -12,7 +12,7 @@
     },
     "goal": {
       "type": "object",
-      "required": ["statement", "definition_of_done", "verification"],
+      "required": ["statement", "definition_of_done"],
       "properties": {
         "statement": { "type": "string", "minLength": 1 },
         "definition_of_done": { "type": "string", "minLength": 1 },
@@ -20,9 +20,19 @@
           "type": "array",
           "items": {
             "type": "object",
-            "anyOf": [
-              { "required": ["file"] },
-              { "required": ["cmd"] }
+            "properties": {
+              "file": { "type": "string", "minLength": 1 },
+              "cmd": {
+                "anyOf": [
+                  { "$ref": "#/$defs/argv" },
+                  { "type": "string", "minLength": 1 }
+                ]
+              },
+              "timeout_sec": { "type": "integer", "minimum": 1 }
+            },
+            "oneOf": [
+              { "required": ["file"], "not": { "required": ["cmd"] } },
+              { "required": ["cmd"], "not": { "required": ["file"] } }
             ]
           }
         },
@@ -68,7 +78,15 @@
       "required": ["max_iterations"],
       "properties": {
         "max_iterations": { "type": "integer", "minimum": 1 },
-        "budget": { "type": "object" },
+        "budget": {
+          "type": "object",
+          "properties": {
+            "usd": { "type": "number", "exclusiveMinimum": 0 },
+            "tokens": { "type": "number", "exclusiveMinimum": 0 },
+            "wall_clock_min": { "type": "number", "exclusiveMinimum": 0 }
+          },
+          "additionalProperties": true
+        },
         "no_progress": {
           "type": "object",
           "properties": {
@@ -148,7 +166,8 @@
             "type": { "const": "programmatic" },
             "check": { "$ref": "#/$defs/argv" },
             "expect": { "enum": ["exit_zero", "exit_nonzero", "stdout_contains"] },
-            "contains": { "type": "string" }
+            "contains": { "type": "string" },
+            "timeout_sec": { "type": "integer", "minimum": 1 }
           },
           "required": ["check", "expect"]
         },
@@ -170,7 +189,7 @@
     },
     "gate": {
       "type": "object",
-      "required": ["when", "members", "verdict_policy", "criteria", "max_revisions"],
+      "required": ["verdict_policy"],
       "properties": {
         "when": { "type": "string" },
         "members": {
