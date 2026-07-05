@@ -13,6 +13,7 @@ import datetime as _dt
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -22,6 +23,27 @@ from typing import Any
 
 DEFAULT_REDACTIONS = [".env", ".env.*", "secrets/**", "**/*.key"]
 REGISTRY_PATH = Path.home() / ".looper" / "models.json"
+
+# The registry stores invocation metadata only, never credentials. Refuse
+# values that look like secrets so a stray key can't land on disk.
+SECRET_PATTERNS = [
+    re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"\bghp_[A-Za-z0-9]{20,}"),
+    re.compile(r"\bxox[a-z]-[A-Za-z0-9-]{10,}"),
+    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"(?i)\b(api[-_]?key|token|secret|password)\s*[=:]\s*\S{8,}"),
+]
+
+
+def reject_secret_material(values: list[str], context: str) -> None:
+    for value in values:
+        for pattern in SECRET_PATTERNS:
+            if pattern.search(value):
+                raise LooperError(
+                    f"{context} looks like it contains a credential; the model registry "
+                    "must never store secrets. Configure auth in the CLI's own config or "
+                    "keychain instead."
+                )
 
 MODEL_PROBES: dict[str, dict[str, Any]] = {
     "claude": {
@@ -70,7 +92,7 @@ def load_yaml(path: Path) -> dict[str, Any]:
         ) from exc
 
     try:
-        with path.open("r", encoding="utf-8") as fh:
+        with path.open("r", encoding="utf-8-sig") as fh:
             data = yaml.safe_load(fh)
     except OSError as exc:
         raise LooperError(f"Could not read {path}: {exc}") from exc
@@ -82,16 +104,28 @@ def load_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    with path.open("r", encoding="utf-8") as fh:
-        data = json.load(fh)
+    try:
+        # utf-8-sig tolerates a BOM left by Windows editors.
+        with path.open("r", encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except OSError as exc:
+        raise LooperError(f"Could not read {path}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise LooperError(f"Could not parse JSON in {path}: {exc}") from exc
     if not isinstance(data, dict):
         raise LooperError(f"{path} must contain a JSON object")
     return data
 
 
-def write_json(path: Path, data: Any) -> None:
+def write_text_lf(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(to_jsonable(data), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Explicit LF keeps generated artifacts byte-identical across platforms.
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def write_json(path: Path, data: Any) -> None:
+    write_text_lf(path, json.dumps(to_jsonable(data), indent=2, sort_keys=True) + "\n")
 
 
 def to_jsonable(value: Any) -> Any:
@@ -107,7 +141,7 @@ def to_jsonable(value: Any) -> Any:
 def read_registry(path: Path = REGISTRY_PATH) -> dict[str, Any]:
     if not path.exists():
         return {}
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig") as fh:
         data = json.load(fh)
     if not isinstance(data, dict):
         raise LooperError(f"Registry {path} must contain a JSON object")
@@ -168,14 +202,35 @@ def detect_models() -> dict[str, Any]:
 
 def normalize_argv(value: Any, field: str) -> list[str]:
     if isinstance(value, list) and all(isinstance(item, str) for item in value):
-        return value
-    if isinstance(value, str):
-        return shlex.split(value, posix=os.name != "nt")
-    raise LooperError(f"{field} must be an argv array or string")
+        argv = value
+    elif isinstance(value, str):
+        argv = shlex.split(value, posix=os.name != "nt")
+    else:
+        raise LooperError(f"{field} must be an argv array or string")
+    if not argv or not argv[0].strip():
+        raise LooperError(f"{field} must not be empty")
+    return argv
+
+
+def validate_timeout(value: Any, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise LooperError(f"{field} must be a positive integer")
+    return value
+
+
+def validate_relative_path(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise LooperError(f"{field} must be a non-empty string")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise LooperError(
+            f"{field} must be a relative path inside the loop directory (got {value!r})"
+        )
+    return value
 
 
 def criteria_by_id(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    criteria = spec.get("goal", {}).get("verification", [])
+    criteria = spec.get("goal", {}).get("verification") or []
     if not isinstance(criteria, list):
         raise LooperError("goal.verification must be a list")
     result: dict[str, dict[str, Any]] = {}
@@ -192,6 +247,9 @@ def criteria_by_id(spec: dict[str, Any]) -> dict[str, dict[str, Any]]:
             raise LooperError(f"Criterion {cid} has invalid type: {ctype}")
         if ctype == "programmatic":
             item["check"] = normalize_argv(item.get("check"), f"criterion {cid}.check")
+            item["timeout_sec"] = validate_timeout(
+                item.setdefault("timeout_sec", 300), f"criterion {cid}.timeout_sec"
+            )
             if item.get("expect") not in {"exit_zero", "exit_nonzero", "stdout_contains"}:
                 raise LooperError(
                     f"Criterion {cid}.expect must be exit_zero, exit_nonzero, or stdout_contains"
@@ -213,10 +271,12 @@ def validate_member(member: dict[str, Any]) -> None:
         raise LooperError("Each council member needs a non-empty id")
     if role not in {"reviewer", "judge"}:
         raise LooperError(f"Council member {mid} role must be reviewer or judge")
+    if not isinstance(member.get("cli"), str) or not member["cli"].strip():
+        raise LooperError(f"Council member {mid} needs a cli name")
     member["invoke"] = normalize_argv(member.get("invoke"), f"council.{mid}.invoke")
-    timeout = member.get("timeout_sec", 600)
-    if not isinstance(timeout, int) or timeout <= 0:
-        raise LooperError(f"Council member {mid}.timeout_sec must be a positive integer")
+    member["timeout_sec"] = validate_timeout(
+        member.setdefault("timeout_sec", 600), f"council.{mid}.timeout_sec"
+    )
     member.setdefault("scope", ["plan", "delivery"])
     member.setdefault("local", member.get("cli") == "ollama")
 
@@ -235,10 +295,18 @@ def validate_gate(
     max_revisions = gate.get("max_revisions", 1)
     if not isinstance(max_revisions, int) or max_revisions < 0:
         raise LooperError(f"{name}.max_revisions must be a non-negative integer")
-    for cid in gate.get("criteria", []):
+    gate_criteria = gate.get("criteria") or []
+    if not isinstance(gate_criteria, list):
+        raise LooperError(f"{name}.criteria must be a list")
+    gate["criteria"] = gate_criteria
+    for cid in gate_criteria:
         if cid not in criteria:
             raise LooperError(f"{name} references unknown criterion: {cid}")
-    for mid in gate.get("members", []):
+    gate_members = gate.get("members") or []
+    if not isinstance(gate_members, list):
+        raise LooperError(f"{name}.members must be a list")
+    gate["members"] = gate_members
+    for mid in gate_members:
         if mid not in members:
             raise LooperError(f"{name} references unknown council member: {mid}")
     if policy == "revise_until_clean":
@@ -249,6 +317,10 @@ def validate_gate(
             raise LooperError(f"{name}.verdict_source must be a judge member or human")
         if members[source].get("role") != "judge":
             raise LooperError(f"{name}.verdict_source must name a judge, not a reviewer")
+        if source not in gate_members:
+            raise LooperError(
+                f"{name}.verdict_source {source!r} must also be listed in {name}.members"
+            )
 
 
 def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
@@ -263,30 +335,48 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
     if not isinstance(goal.get("definition_of_done"), str) or not goal["definition_of_done"].strip():
         raise LooperError("goal.definition_of_done is required")
 
-    for index, source in enumerate(goal.get("context_sources", [])):
+    context_sources = goal.get("context_sources") or []
+    if not isinstance(context_sources, list):
+        raise LooperError("goal.context_sources must be a list")
+    goal["context_sources"] = context_sources
+    for index, source in enumerate(context_sources):
         if not isinstance(source, dict):
             raise LooperError("goal.context_sources entries must be objects")
-        if "cmd" in source:
+        has_file = "file" in source
+        has_cmd = "cmd" in source
+        if has_file == has_cmd:
+            raise LooperError(
+                f"context_sources[{index}] must have exactly one of file or cmd"
+            )
+        if has_file:
+            validate_relative_path(source["file"], f"context_sources[{index}].file")
+        if has_cmd:
             source["cmd"] = normalize_argv(source["cmd"], f"context_sources[{index}].cmd")
+            source["timeout_sec"] = validate_timeout(
+                source.setdefault("timeout_sec", 60), f"context_sources[{index}].timeout_sec"
+            )
 
     criteria = criteria_by_id(spec)
 
     host = spec.get("host")
     if not isinstance(host, dict):
         raise LooperError("host must be an object")
+    if not isinstance(host.get("cli"), str) or not host["cli"].strip():
+        raise LooperError("host.cli is required")
     host["invoke"] = normalize_argv(host.get("invoke"), "host.invoke")
-    host.setdefault("timeout_sec", 600)
-    if not isinstance(host["timeout_sec"], int) or host["timeout_sec"] <= 0:
-        raise LooperError("host.timeout_sec must be a positive integer")
+    host["timeout_sec"] = validate_timeout(host.setdefault("timeout_sec", 600), "host.timeout_sec")
 
-    council_list = spec.get("council", [])
+    council_list = spec.get("council") or []
     if not isinstance(council_list, list):
         raise LooperError("council must be a list")
+    members: dict[str, dict[str, Any]] = {}
     for member in council_list:
         if not isinstance(member, dict):
             raise LooperError("council entries must be objects")
         validate_member(member)
-    members = {member["id"]: member for member in council_list}
+        if member["id"] in members:
+            raise LooperError(f"Duplicate council member id: {member['id']}")
+        members[member["id"]] = member
 
     gates = spec.get("gates")
     if not isinstance(gates, dict):
@@ -305,6 +395,11 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
         raise LooperError("loop_control.budget must be an object")
     if "wall_clock_min" not in budget:
         budget["wall_clock_min"] = 30
+    for key in ("usd", "tokens", "wall_clock_min"):
+        if key in budget and budget[key] is not None:
+            value = budget[key]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise LooperError(f"loop_control.budget.{key} must be a positive number")
     no_progress = control.setdefault(
         "no_progress",
         {
@@ -371,6 +466,7 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
     if not isinstance(workspace, dict):
         raise LooperError("workspace must be an object")
     workspace.setdefault("dir", "./loop-workspace")
+    validate_relative_path(workspace["dir"], "workspace.dir")
     layout = workspace.setdefault("layout", ["plan.md", "delivery-{n}.md", "review-{n}.md", "state.json", "run-log.md"])
     if not isinstance(layout, list) or not all(isinstance(item, str) for item in layout):
         raise LooperError("workspace.layout must be a list of strings")
@@ -708,11 +804,19 @@ def cmd_detect(args: argparse.Namespace) -> int:
 def cmd_register(args: argparse.Namespace) -> int:
     if not args.invoke:
         raise LooperError("--invoke needs at least one command token")
+    # argparse cannot accept flag-like tokens after --invoke, so a single
+    # quoted string (e.g. --invoke "claude -p") is split shell-style.
+    invoke = list(args.invoke)
+    if len(invoke) == 1:
+        invoke = normalize_argv(invoke[0], "--invoke")
+    reject_secret_material(invoke, "--invoke")
+    if args.notes:
+        reject_secret_material([args.notes], "--notes")
     registry = read_registry(args.registry)
     registry[args.model_id] = {
-        "cli": args.invoke[0],
-        "invoke": args.invoke,
-        "available": shutil.which(args.invoke[0]) is not None,
+        "cli": invoke[0],
+        "invoke": invoke,
+        "available": shutil.which(invoke[0]) is not None,
         "authed": args.authed,
         "local": args.local,
         "model": args.model,
@@ -730,11 +834,9 @@ def cmd_compile(args: argparse.Namespace) -> int:
     out = args.out or source.with_name("loop.resolved.json")
     write_json(out, resolved)
     if args.render:
-        args.render.parent.mkdir(parents=True, exist_ok=True)
-        args.render.write_text(render_loop(resolved), encoding="utf-8")
+        write_text_lf(args.render, render_loop(resolved))
     if args.session_prompt:
-        args.session_prompt.parent.mkdir(parents=True, exist_ok=True)
-        args.session_prompt.write_text(render_session_prompt(resolved), encoding="utf-8")
+        write_text_lf(args.session_prompt, render_session_prompt(resolved))
     print(f"Wrote {out}")
     if args.render:
         print(f"Wrote {args.render}")
@@ -747,8 +849,7 @@ def cmd_session_prompt(args: argparse.Namespace) -> int:
     resolved = load_json(args.resolved_json)
     prompt = render_session_prompt(resolved)
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(prompt, encoding="utf-8")
+        write_text_lf(args.out, prompt)
         print(f"Wrote {args.out}")
     else:
         print(prompt)

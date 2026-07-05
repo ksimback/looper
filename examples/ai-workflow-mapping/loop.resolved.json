@@ -1,6 +1,6 @@
 {
   "$schema": "https://github.com/ksimback/looper/schema/loop.resolved.v1.json",
-  "compiled_at": "2026-06-19T07:09:26+00:00",
+  "compiled_at": "2026-07-05T06:02:07+00:00",
   "council": [
     {
       "cli": "claude",
@@ -51,6 +51,7 @@
       ],
       "expect": "exit_zero",
       "id": "required-sections",
+      "timeout_sec": 300,
       "type": "programmatic"
     }
   },
@@ -106,6 +107,7 @@
         ],
         "expect": "exit_zero",
         "id": "required-sections",
+        "timeout_sec": 300,
         "type": "programmatic"
       },
       {
