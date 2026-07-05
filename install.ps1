@@ -14,12 +14,21 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "Git is required to install Looper. Install Git, then rerun this command."
 }
 
-$Python = Get-Command python -ErrorAction SilentlyContinue
-if (-not $Python) {
-    $Python = Get-Command py -ErrorAction SilentlyContinue
+# Validate by executing, not just locating: on Windows, "python" on PATH is
+# often the Microsoft Store alias stub, which exists but cannot run scripts.
+$Python = $null
+foreach ($Candidate in @("python", "py")) {
+    $Command = Get-Command $Candidate -ErrorAction SilentlyContinue
+    if ($Command) {
+        & $Command.Source -c "" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $Python = $Command
+            break
+        }
+    }
 }
 if (-not $Python) {
-    throw "Python 3 is required to install Looper. Install Python 3, then rerun this command."
+    throw "A working Python 3 is required to install Looper. Install Python 3 (not the Microsoft Store alias), then rerun this command."
 }
 
 New-Item -ItemType Directory -Force -Path $SkillsDir, $CommandsDir | Out-Null

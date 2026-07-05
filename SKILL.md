@@ -90,8 +90,13 @@ invocation below with this resolution (works in POSIX shells and Git Bash on
 Windows):
 
 ```bash
-LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/Scripts/python.exe"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON="$(command -v python3 || command -v python)"
+LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/Scripts/python.exe"; [ -x "$LOOPER_PYTHON" ] || { LOOPER_PYTHON=python3; "$LOOPER_PYTHON" -c "" >/dev/null 2>&1 || LOOPER_PYTHON=python; }
 ```
+
+The final fallback executes the candidate rather than just locating it: on
+Windows, `python3` on PATH is often the Microsoft Store alias stub, which
+exists but cannot run scripts. If no candidate can execute `-c ""`, tell the
+user to rerun the Looper installer (it creates the venv).
 
 ## Helper Scripts
 
