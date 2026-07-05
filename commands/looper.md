@@ -31,7 +31,9 @@ Parse `$ARGUMENTS` as `[target-dir] [--template <name>]`, in any order:
   follow the skill's Template Mode (the catalog lives at
   `templates/loops/` inside the skill directory). `--template` with no
   name means: show the catalog and ask.
-- The remaining token, if any, is the target directory. If none is left,
-  use `./looper-output`.
+- Remove `--template <name>` from the arguments first; everything left is the
+  target directory — treat it as a single path even if it contains spaces
+  (e.g. `C:\My Loops\out`), and do not split it into multiple tokens. If
+  nothing is left, use `./looper-output`.
 
 Then continue with the Looper skill workflow.

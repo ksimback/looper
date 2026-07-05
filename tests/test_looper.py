@@ -671,5 +671,127 @@ class LooperTests(unittest.TestCase):
             self.assertNotIn("unresolved template placeholders", filled.stderr)
 
 
+LOOPS = ROOT / "templates" / "loops"
+
+
+class SecurityScanTemplateTests(unittest.TestCase):
+    SCANNER = LOOPS / "security-scan" / "scripts" / "scan-secrets.py"
+
+    def _sweep(self, files: dict[str, str]) -> list[dict]:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            for name, body in files.items():
+                (repo / name).write_text(body, encoding="utf-8")
+            out = Path(tmp) / "cand.json"
+            result = run_cmd(
+                [sys.executable, str(self.SCANNER), str(repo), "--out", str(out), "--no-history"],
+                ROOT,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads(out.read_text(encoding="utf-8"))["candidates"]
+
+    def test_detects_underscore_joined_credential_names(self) -> None:
+        cands = self._sweep({"config.py": (
+            'SECRET_KEY = "Zq9rT2vXw8LmNp4c"\n'
+            "DB_PASSWORD=Corr3ctHorseBat\n"
+            "client_secret: NineCharsX\n"
+        )})
+        self.assertEqual(len(cands), 3, cands)
+
+    def test_value_containing_test_is_not_suppressed(self) -> None:
+        cands = self._sweep({"config.py": "password = Contest2024xyz\n"})
+        self.assertEqual(len(cands), 1, cands)
+
+    def test_distinct_short_secrets_not_collapsed_by_mask(self) -> None:
+        cands = self._sweep({"config.py": "password = hunter22aa\ntoken: swordfish9xy\n"})
+        self.assertEqual(len(cands), 2, cands)
+
+    def test_obvious_placeholder_values_are_suppressed(self) -> None:
+        cands = self._sweep({"config.py": 'api_key = "your_key_placeholder"\n'})
+        self.assertEqual(cands, [])
+
+    def test_masked_excerpt_never_contains_full_value(self) -> None:
+        cands = self._sweep({"config.py": "password = hunter22aa\n"})
+        self.assertEqual(len(cands), 1)
+        self.assertNotIn("hunter22aa", cands[0]["excerpt"])
+
+
+class TemplateCheckerScriptTests(unittest.TestCase):
+    def _run(self, script: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return run_cmd([sys.executable, str(script), *args], ROOT)
+
+    def test_findings_rejects_triple_question_placeholder(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "SECURITY-FINDINGS.md"
+            report.write_text(
+                "# Findings\n\nsecret pii vulnerability\nType: bug\nSeverity: high\n"
+                "Location: a.py:1\nRemediation: ???\n",
+                encoding="utf-8",
+            )
+            result = self._run(
+                LOOPS / "security-scan" / "scripts" / "check-findings.py", str(report)
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("placeholder", result.stderr)
+
+    def test_findings_incidental_no_secrets_phrase_does_not_waive_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "SECURITY-FINDINGS.md"
+            report.write_text(
+                "# Report\n\nsecret pii vulnerability scan.\n"
+                "No secrets were detected in git history.\n"
+                "Critical issue at server.py:42 but no field labels.\n",
+                encoding="utf-8",
+            )
+            result = self._run(
+                LOOPS / "security-scan" / "scripts" / "check-findings.py", str(report)
+            )
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("missing required field label", result.stderr)
+
+    def test_findings_genuine_empty_report_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "SECURITY-FINDINGS.md"
+            report.write_text(
+                "# Report\n\nChecked secret, pii, vulnerability areas.\nNo findings.\n",
+                encoding="utf-8",
+            )
+            result = self._run(
+                LOOPS / "security-scan" / "scripts" / "check-findings.py", str(report)
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_citations_reject_path_outside_sources_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            loop = Path(tmp)
+            (loop / "inputs" / "sources").mkdir(parents=True)
+            (loop / "inputs" / "sources" / "a.md").write_text("notes\n", encoding="utf-8")
+            (loop / "loop-workspace").mkdir()
+            (loop / "loop-workspace" / "report-draft-1.md").write_text("draft\n", encoding="utf-8")
+            report = loop / "loop-workspace" / "REPORT.md"
+            checker = LOOPS / "research-synthesis" / "scripts" / "check-citations.py"
+
+            report.write_text(
+                "# A\n\nClaim supported here indeed. [source: loop-workspace/report-draft-1.md]\n",
+                encoding="utf-8",
+            )
+            outside = run_cmd(
+                [sys.executable, str(checker), "loop-workspace/REPORT.md", "--sources", "inputs/sources"],
+                loop,
+            )
+            self.assertEqual(outside.returncode, 1, outside.stdout)
+
+            report.write_text(
+                "# A\n\nClaim supported here indeed. [source: inputs/sources/a.md]\n",
+                encoding="utf-8",
+            )
+            inside = run_cmd(
+                [sys.executable, str(checker), "loop-workspace/REPORT.md", "--sources", "inputs/sources"],
+                loop,
+            )
+            self.assertEqual(inside.returncode, 0, inside.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

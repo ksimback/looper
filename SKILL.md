@@ -82,6 +82,10 @@ directory per template containing a complete, compilable `loop.yaml` (with
 
 A template is a pre-answered interview, not a bypass of design review:
 
+0. If the target directory already contains a `loop.yaml`, the edit/resume
+   rule in step 1 wins: do **not** overwrite it with a template. Say the
+   directory already has a loop and ask the user to pick an empty target or
+   confirm they want it replaced before continuing.
 1. If `--template` has no name, an unknown name, or the user asks what is
    available, show the catalog table (template + use-when) and let them pick.
 2. Read the template's `loop.yaml` and `README.md`. Use the template as the

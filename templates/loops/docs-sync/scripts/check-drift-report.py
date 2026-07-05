@@ -25,7 +25,9 @@ from pathlib import Path
 
 REQUIRED_FIELDS = ["doc", "code", "status"]
 STATUS_SCALE = re.compile(r"\b(fixed|deferred)\b", re.IGNORECASE)
-PLACEHOLDERS = re.compile(r"\b(TBD|TODO|FIXME|XXX|\?\?\?)\b", re.IGNORECASE)
+# `?` is not a word char, so `\b\?\?\?\b` can never match; keep `???` as its
+# own alternative outside the word-boundary group.
+PLACEHOLDERS = re.compile(r"\b(?:TBD|TODO|FIXME|XXX)\b|\?\?\?", re.IGNORECASE)
 
 
 def main() -> int:
@@ -46,8 +48,12 @@ def main() -> int:
     lower = text.lower()
     problems = []
 
-    declares_no_drift = bool(re.search(
-        r"no (drift|mismatches|discrepancies)( items| found| detected)?", lower))
+    # Waive the per-item fields only for a genuine no-drift report: a standalone
+    # declaration line AND no drift signal (a fixed/deferred status). A "no drift
+    # in section X" line inside a populated report must not waive validation.
+    declares_empty = bool(re.search(
+        r"(?m)^[\s>*#-]*no (?:drift|mismatches|discrepancies)\b", lower))
+    declares_no_drift = declares_empty and not STATUS_SCALE.search(text)
     if not declares_no_drift:
         for field in REQUIRED_FIELDS:
             if field not in lower:

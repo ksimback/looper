@@ -22,7 +22,9 @@ from pathlib import Path
 
 REQUIRED_LABELS = ["root cause", "fix", "before", "after"]
 FILE_LINE = re.compile(r"\S+:\d+")
-PLACEHOLDERS = re.compile(r"\b(TBD|TODO|FIXME|XXX|\?\?\?)\b", re.IGNORECASE)
+# `?` is not a word char, so `\b\?\?\?\b` can never match; keep `???` as its
+# own alternative outside the word-boundary group.
+PLACEHOLDERS = re.compile(r"\b(?:TBD|TODO|FIXME|XXX)\b|\?\?\?", re.IGNORECASE)
 
 
 def main() -> int:

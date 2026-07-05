@@ -49,7 +49,8 @@ def find_placeholders(value: Any) -> set[str]:
         for item in value:
             found.update(find_placeholders(item))
     elif isinstance(value, dict):
-        for item in value.values():
+        for key, item in value.items():
+            found.update(find_placeholders(key))
             found.update(find_placeholders(item))
     return found
 

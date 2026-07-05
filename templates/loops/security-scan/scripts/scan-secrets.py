@@ -23,7 +23,9 @@ Stdlib only, Python 3.9+, cross-platform.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -46,6 +48,7 @@ SKIP_DIRS = {
     "venv",
     ".tox",
     ".mypy_cache",
+    ".ipynb_checkpoints",
     "coverage",
     "target",
 }
@@ -60,29 +63,26 @@ SKIP_FILE_GLOBS = [
     "yarn.lock",
     "pnpm-lock.yaml",
     "*.svg",
-    "*.ipynb checkpoints",
 ]
 
 MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
 BINARY_SNIFF_BYTES = 8 * 1024  # 8 KB
 
 # Case-insensitive substrings that mark a captured value as an obvious placeholder.
+# Kept deliberately specific: a marker that also appears inside real credentials
+# (e.g. "test", which suppresses "Contest2024!" or "prodtest-…") causes false
+# negatives, which for a secret sweep is the worst failure mode.
 PLACEHOLDER_MARKERS = [
     "example",
-    "sample",
     "placeholder",
     "changeme",
     "your_key",
     "your-key",
     "yourkey",
     "xxxx",
-    "dummy",
-    "test",
-    "fake",
     "<",
     "{{",
 ]
-_PLACEHOLDER_RE = re.compile(r"your[_-]?key", re.IGNORECASE)
 
 # --- Detection patterns ------------------------------------------------------
 # Each entry is (pattern_id, compiled regex). Group 1, when present, is the
@@ -97,9 +97,13 @@ PATTERNS: List[Tuple[str, Pattern[str]]] = [
     ),
     (
         "generic_secret_assignment",
+        # The keyword may be embedded in a larger identifier: SECRET_KEY,
+        # DB_PASSWORD, client_secret, POSTGRES_PASSWORD. Underscore is a word
+        # char, so a trailing \b after the keyword would reject exactly those
+        # common names; instead allow identifier chars on either side.
         re.compile(
-            r"(?i)\b(?:api[_-]?key|apikey|token|secret|passwd|password)\b\s*[=:]\s*"
-            r"['\"]?([^\s'\"]{8,})['\"]?"
+            r"(?i)[A-Za-z0-9_]*(?:api[_-]?key|apikey|token|secret|passwd|password)"
+            r"[A-Za-z0-9_]*\s*[=:]\s*['\"]?([^\s'\"]{8,})['\"]?"
         ),
     ),
     ("bearer_token", re.compile(r"(?i)bearer\s+([A-Za-z0-9._\-+/=]{8,})")),
@@ -136,22 +140,27 @@ _PHONE_KEYWORD_RE = re.compile(r"(?i)\b(phone|tel|mobile|cell)\b")
 def is_placeholder(value: str) -> bool:
     """True when the captured value looks like an obvious placeholder/example."""
     low = value.lower()
-    for marker in PLACEHOLDER_MARKERS:
-        if marker in low:
-            return True
-    if _PLACEHOLDER_RE.search(value):
-        return True
-    return False
+    return any(marker in low for marker in PLACEHOLDER_MARKERS)
 
 
 def mask(value: str) -> str:
-    """Mask a secret value: keep first 4 and last 4 chars, elide the middle.
+    """Mask a secret value for display: keep a few edge chars, elide the middle.
 
-    Anything shorter than 12 chars is fully masked so short values don't leak.
+    The exact length is never revealed (a fixed elision, not one dot per char),
+    and the mask is display-only — dedupe keys off a hash of the raw value, not
+    this string, so two distinct secrets never collapse just because they mask
+    the same way.
     """
-    if len(value) < 12:
-        return "…" * len(value) if value else "…"
-    return f"{value[:4]}…{value[-4:]}"
+    if len(value) >= 12:
+        return f"{value[:4]}…{value[-4:]}"
+    if len(value) >= 6:
+        return f"{value[:2]}…{value[-2:]}"
+    return "…"
+
+
+def value_fingerprint(value: str) -> str:
+    """Stable, non-reversible fingerprint of a raw value for deduping."""
+    return hashlib.sha256(value.encode("utf-8", "ignore")).hexdigest()[:16]
 
 
 def _skip_by_glob(name: str) -> bool:
@@ -159,16 +168,20 @@ def _skip_by_glob(name: str) -> bool:
 
 
 def iter_worktree_files(repo: Path) -> Iterable[Path]:
-    """Yield candidate files under repo, honoring the skip lists."""
-    for path in repo.rglob("*"):
-        if not path.is_file():
-            continue
-        rel_parts = set(path.relative_to(repo).parts)
-        if rel_parts & SKIP_DIRS:
-            continue
-        if _skip_by_glob(path.name):
-            continue
-        yield path
+    """Yield candidate files under repo, honoring the skip lists.
+
+    Prunes skipped directories in place so the walk never descends into
+    .git / node_modules / .venv / etc. (rglob would stat every entry first).
+    """
+    for dirpath, dirnames, filenames in os.walk(repo):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        base = Path(dirpath)
+        for name in filenames:
+            if _skip_by_glob(name):
+                continue
+            path = base / name
+            if path.is_file():
+                yield path
 
 
 def looks_binary(path: Path) -> bool:
@@ -212,8 +225,10 @@ class Sweeper:
         line: Optional[int] = None,
         commit: Optional[str] = None,
     ) -> None:
-        masked = mask(value)
-        key = (pattern_id, path, masked)
+        # Dedupe on a hash of the RAW value, not the masked form — masking is
+        # lossy (short values elide to the same string), so masked-keyed dedupe
+        # silently drops distinct secrets that happen to mask alike.
+        key = (pattern_id, path, value_fingerprint(value))
         if key in self._seen:
             return
         self._seen.add(key)
@@ -223,7 +238,7 @@ class Sweeper:
             "pattern": pattern_id,
             "source": source,
             "path": path,
-            "excerpt": masked,
+            "excerpt": mask(value),
         }
         if source == "worktree":
             entry["line"] = line

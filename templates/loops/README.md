@@ -32,6 +32,9 @@ the flow preview before emitting.
 - Templates that edit files (`bug-hunt`, `docs-sync`) do so under
   side-effect approval and never commit; read-only templates say so in
   their `execution.side_effects.notes`.
+- Programmatic checks invoke the interpreter as `python` (matching the
+  repo's example loop). On a machine where only `python3` is on PATH, the
+  wizard should swap the interpreter token when it customizes the template.
 
 ## Adding a template
 

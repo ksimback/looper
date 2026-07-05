@@ -22,8 +22,15 @@ separately via `version:` in `loop.yaml` (currently `1`).
   in the resolved spec; the wizard treats the warning as an emit blocker.
 - `scan-secrets.py` (security-scan template): deterministic secret/PII
   candidate sweep over working tree + full git history — streaming reads,
-  generated/vendor paths skipped, masked excerpts only, placeholder-value
-  suppression.
+  directory-pruned walk, masked excerpts only, placeholder-value
+  suppression. Detects underscore-joined credential names (`SECRET_KEY`,
+  `DB_PASSWORD`, `client_secret`), does not suppress real secrets whose
+  value merely contains `test`, and dedupes on a hash of the raw value so
+  distinct secrets that mask alike are never dropped.
+- Template checker scripts reject `???` placeholders, only waive
+  required-field validation for a genuinely empty report (standalone
+  no-findings line with no finding signal), and validate citations resolve
+  to a file under the sources directory.
 - 2 new tests (18 total): every template must compile (with the expected
   placeholder warning) and be listed in the catalog; the warning must
   disappear after substitution.

@@ -26,7 +26,9 @@ from pathlib import Path
 REQUIRED_FIELDS = ["type", "severity", "location", "rationale"]
 SEVERITY_SCALE = re.compile(r"\b(critical|major|minor)\b", re.IGNORECASE)
 FILE_LINE = re.compile(r"\S+:\d+")
-PLACEHOLDERS = re.compile(r"\b(TBD|TODO|FIXME|XXX|\?\?\?)\b", re.IGNORECASE)
+# `?` is not a word char, so `\b\?\?\?\b` can never match; keep `???` as its
+# own alternative outside the word-boundary group.
+PLACEHOLDERS = re.compile(r"\b(?:TBD|TODO|FIXME|XXX)\b|\?\?\?", re.IGNORECASE)
 
 
 def main() -> int:
@@ -52,9 +54,15 @@ def main() -> int:
         problems.append("report never names the reviewed range (branch/base/diff)")
 
     # 2. A report with findings must expose all required fields somewhere.
-    #    If the report explicitly states no findings, fields are not required.
-    declares_no_findings = bool(re.search(
-        r"no (confirmed )?(findings|issues|defects|problems)", lower))
+    #    If the report explicitly declares no findings, fields are not required —
+    #    but only when it's a genuine empty report: a standalone declaration line
+    #    AND no finding signal (a severity term or a file:line). Otherwise an
+    #    incidental "no issues in module X" sentence would waive validation.
+    declares_empty = bool(re.search(
+        r"(?m)^[\s>*#-]*no (?:confirmed |material )?(?:findings|issues|defects|problems)\b",
+        lower))
+    has_finding_signal = bool(SEVERITY_SCALE.search(text) or FILE_LINE.search(text))
+    declares_no_findings = declares_empty and not has_finding_signal
     if not declares_no_findings:
         for field in REQUIRED_FIELDS:
             if field not in lower:

@@ -24,8 +24,31 @@ import sys
 from pathlib import Path
 
 CITATION = re.compile(r"\[source:\s*([^\]]+?)\s*\]")
-PLACEHOLDERS = re.compile(r"\b(TBD|TODO|FIXME|XXX|\?\?\?)\b", re.IGNORECASE)
+# `?` is not a word char, so `\b\?\?\?\b` can never match; keep `???` as its
+# own alternative outside the word-boundary group.
+PLACEHOLDERS = re.compile(r"\b(?:TBD|TODO|FIXME|XXX)\b|\?\?\?", re.IGNORECASE)
 SUBSTANTIVE_WORDS = 40
+
+
+def resolves_under_sources(raw: str, sources: Path) -> bool:
+    """True only when the cited path is a real file located under `sources`.
+
+    Guards against citing a file outside the sources tree (e.g. the model's own
+    draft, or an unrelated same-basename file elsewhere): a citation of
+    `inputs/sources/foo.md` (loop-dir-relative) or a bare `foo.md` must both
+    land inside the sources directory to count.
+    """
+    sources_root = sources.resolve()
+    for candidate in (Path(raw), sources / Path(raw).name):
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.is_file() and (
+            resolved.parent == sources_root or sources_root in resolved.parents
+        ):
+            return True
+    return False
 
 
 def paragraphs(text: str) -> list[str]:
@@ -56,12 +79,12 @@ def main() -> int:
     if not cited:
         problems.append("no [source: <path>] citations anywhere in the report")
 
-    # 1. Every cited path must exist. Citations are written relative to the
-    #    loop dir (inputs/sources/<file>); accept sources-dir-relative too.
+    # 1. Every cited path must resolve to a real file UNDER the sources dir.
+    #    A path that exists elsewhere (a draft, an unrelated same-name file) is
+    #    not a valid citation.
     for raw in sorted(set(cited)):
-        candidate = Path(raw)
-        if not (candidate.is_file() or (args.sources / candidate.name).is_file()):
-            problems.append(f"cited source does not exist: '{raw}'")
+        if not resolves_under_sources(raw, args.sources):
+            problems.append(f"cited source is not a file under {args.sources}: '{raw}'")
 
     # 2. Substantive paragraphs must be cited.
     for para in paragraphs(text):

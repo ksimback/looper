@@ -22,7 +22,11 @@ from pathlib import Path
 
 REQUIRED_AREAS = ["secret", "pii", "vulnerab"]  # substrings, case-insensitive
 REQUIRED_FIELDS = ["type", "severity", "location", "remediation"]
-PLACEHOLDERS = re.compile(r"\b(TBD|TODO|FIXME|XXX|\?\?\?)\b", re.IGNORECASE)
+SEVERITY_SCALE = re.compile(r"\b(critical|high|medium|low|major|minor)\b", re.IGNORECASE)
+FILE_LINE = re.compile(r"\S+:\d+")
+# `?` is not a word char, so `\b\?\?\?\b` can never match; keep `???` as its
+# own alternative outside the word-boundary group.
+PLACEHOLDERS = re.compile(r"\b(?:TBD|TODO|FIXME|XXX)\b|\?\?\?", re.IGNORECASE)
 
 
 def main() -> int:
@@ -48,10 +52,16 @@ def main() -> int:
         if area not in lower:
             problems.append(f"missing required area keyword: '{area}'")
 
-    # 2. A report with confirmed findings must expose all required fields somewhere.
-    #    If the report explicitly states no findings, fields are not required.
-    declares_no_findings = bool(re.search(
-        r"no (confirmed )?(findings|secrets|vulnerabilities|issues)", lower))
+    # 2. A report with confirmed findings must expose all required fields
+    #    somewhere. Fields are waived only for a genuine empty report: a
+    #    standalone no-findings declaration line AND no finding signal (a
+    #    severity term or a file:line). A prose "no secrets in git history"
+    #    inside a report full of findings must not waive validation.
+    declares_empty = bool(re.search(
+        r"(?m)^[\s>*#-]*no (?:confirmed |material )?(?:findings|secrets|vulnerabilities|issues)\b",
+        lower))
+    has_finding_signal = bool(SEVERITY_SCALE.search(text) or FILE_LINE.search(text))
+    declares_no_findings = declares_empty and not has_finding_signal
     if not declares_no_findings:
         for field in REQUIRED_FIELDS:
             if field not in lower:

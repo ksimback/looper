@@ -28,13 +28,14 @@ goal:
     - id: repro-passes
       type: programmatic
       # The recorded repro. Must have been observed FAILING at plan time
-      # (plan gate checks that); passing here proves the fix.
-      check: ["{{REPRO_CMD}}"]
+      # (plan gate checks that); passing here proves the fix. String form: the
+      # compiler shlex-splits it, so a multi-word command works as written.
+      check: "{{REPRO_CMD}}"
       expect: exit_zero
       timeout_sec: 300
     - id: tests-pass
       type: programmatic
-      check: ["{{TEST_CMD}}"]
+      check: "{{TEST_CMD}}"
       expect: exit_zero
       timeout_sec: 600
     - id: report-schema

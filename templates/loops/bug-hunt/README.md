@@ -23,8 +23,8 @@ error went away".
 | Token | Replace with |
 |-------|--------------|
 | `{{REPO_DIR}}` | Path to the repository containing the bug. |
-| `{{REPRO_CMD}}` | Argv array that triggers the bug, e.g. `["python", "-m", "pytest", "tests/test_x.py::test_bug", "-x"]`. Replace the whole one-element list. |
-| `{{TEST_CMD}}` | Argv array for the full test suite, e.g. `["python", "-m", "pytest"]`. Replace the whole one-element list. |
+| `{{REPRO_CMD}}` | Command that triggers the bug, written as a plain string, e.g. `python -m pytest tests/test_x.py::test_bug -x`. The compiler splits it into an argv for you. |
+| `{{TEST_CMD}}` | Command for the full test suite, e.g. `python -m pytest`. Plain string, split for you. |
 
 Also: put the bug report (the issue text, stack trace, expected vs actual)
 in `inputs/bug-report.md` inside the emitted loop directory.
