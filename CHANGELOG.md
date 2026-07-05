@@ -4,6 +4,30 @@ All notable changes to Looper are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the loop spec format is versioned
 separately via `version:` in `loop.yaml` (currently `1`).
 
+## 0.3.0 — 2026-07-05
+
+### Added — loop pattern library
+- `templates/loops/` — five named, pre-designed loops the wizard customizes
+  instead of starting blank: `security-scan` (promoted from the real run
+  that produced hermes-ecosystem's security fixes), `code-review`,
+  `bug-hunt`, `docs-sync`, and `research-synthesis`. Each is a complete,
+  compiler-validated `loop.yaml` with `{{PLACEHOLDER}}` slots, a README
+  (use-when, placeholder table, customization notes), and helper check
+  scripts where the pattern needs them.
+- `/looper [target-dir] --template <name>` — Template Mode in the wizard:
+  a compressed interview that asks only for the placeholder slots, model
+  selection, and paths, while keeping the full critique, structural-rule,
+  privacy, and preview flow.
+- `looper.py compile` warns when unresolved `{{PLACEHOLDER}}` tokens remain
+  in the resolved spec; the wizard treats the warning as an emit blocker.
+- `scan-secrets.py` (security-scan template): deterministic secret/PII
+  candidate sweep over working tree + full git history — streaming reads,
+  generated/vendor paths skipped, masked excerpts only, placeholder-value
+  suppression.
+- 2 new tests (18 total): every template must compile (with the expected
+  placeholder warning) and be listed in the catalog; the warning must
+  disappear after substitution.
+
 ## 0.2.1 — 2026-07-05
 
 ### Fixed

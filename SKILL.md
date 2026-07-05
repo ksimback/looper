@@ -5,12 +5,14 @@ description: >
   cross-model review council. Use when the user wants to design, build, or set
   up an agent loop, iterative agent workflow, self-review loop, LLM-as-judge
   loop, multi-model council, reviewer/judge gate, or /goal-style looping
-  process. Guide goal refinement, typed verification criteria, reviewer and
-  judge selection, privacy boundaries, termination guards, no-progress stops,
-  and lightweight observability, then emit a RUN_IN_SESSION.md handoff prompt
-  plus portable loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
+  process. Start from a named pattern template (security-scan, code-review,
+  bug-hunt, docs-sync, research-synthesis) or from a blank interview. Guide
+  goal refinement, typed verification criteria, reviewer and judge selection,
+  privacy boundaries, termination guards, no-progress stops, and lightweight
+  observability, then emit a RUN_IN_SESSION.md handoff prompt plus portable
+  loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
 disable-model-invocation: true
-argument-hint: "[target-dir]"
+argument-hint: "[target-dir] [--template <name>]"
 allowed-tools: Read, Write, Bash
 ---
 
@@ -23,9 +25,11 @@ advanced external runner.
 
 ## Workflow
 
-1. Resolve the target path from the `/looper` argument. If no target is given,
-   use `./looper-output`. If the target contains an existing `loop.yaml`, treat
-   the task as an edit/resume instead of a fresh scaffold.
+1. Resolve the target path and optional `--template <name>` from the
+   `/looper` arguments. If no target is given, use `./looper-output`. If the
+   target contains an existing `loop.yaml`, treat the task as an edit/resume
+   instead of a fresh scaffold. If a template was requested, follow Template
+   Mode below instead of the blank-slate interview in step 3.
 2. Load the relevant rubric only when entering that stage:
    - Goal stage: `references/goal-rubric.md`.
    - Verification stage: `references/verification-rubric.md`.
@@ -66,6 +70,37 @@ advanced external runner.
    follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
    the same file is the easy restart path and `run-loop.py` is available for
    advanced external execution.
+
+## Template Mode
+
+The pattern library lives at `${CLAUDE_SKILL_DIR}/templates/loops/` — one
+directory per template containing a complete, compilable `loop.yaml` (with
+`{{PLACEHOLDER}}` tokens marking project-specific slots), a `README.md`
+(use-when, placeholder table, customization notes), and optionally
+`scripts/` with helper checkers. The catalog index is
+`templates/loops/README.md`.
+
+A template is a pre-answered interview, not a bypass of design review:
+
+1. If `--template` has no name, an unknown name, or the user asks what is
+   available, show the catalog table (template + use-when) and let them pick.
+2. Read the template's `loop.yaml` and `README.md`. Use the template as the
+   seed instead of a blank spec.
+3. Run a compressed interview in place of the seven blank-slate stages:
+   ask for each `{{PLACEHOLDER}}` slot named in the template README, run
+   the host-model stage against detected CLIs (`detect-models`) and swap
+   `host` / `council` invocations to what is actually installed and authed,
+   then confirm target and workspace paths.
+4. Everything after the interview still applies unchanged: critique each
+   pre-filled stage against its rubric (step 4), the structural rules
+   (steps 5–8) including the cross-vendor egress statement, the ASCII flow
+   preview, confirmation, emission, and compile.
+5. Never emit while any `{{` token remains in `loop.yaml`. The compiler
+   prints `looper: warning: unresolved template placeholders remain ...`
+   for this case — treat that warning as a blocker, not advice.
+6. At emission, copy the template's `scripts/` directory (when present)
+   into `<target>/scripts/` alongside the standard emitted files, before
+   running compile.
 
 ## File Rules
 

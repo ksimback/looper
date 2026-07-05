@@ -35,6 +35,25 @@ SECRET_PATTERNS = [
 ]
 
 
+# Loop templates under templates/loops/ mark project-specific slots with
+# {{TOKEN}} placeholders. They compile as ordinary strings; the warning below
+# keeps a half-customized template from being run by accident.
+PLACEHOLDER_PATTERN = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
+
+
+def find_placeholders(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, str):
+        found.update(PLACEHOLDER_PATTERN.findall(value))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(find_placeholders(item))
+    elif isinstance(value, dict):
+        for item in value.values():
+            found.update(find_placeholders(item))
+    return found
+
+
 def reject_secret_material(values: list[str], context: str) -> None:
     for value in values:
         for pattern in SECRET_PATTERNS:
@@ -831,6 +850,13 @@ def cmd_compile(args: argparse.Namespace) -> int:
     source = args.loop_yaml.resolve()
     spec = load_yaml(source)
     resolved = normalize_spec(spec, source)
+    placeholders = sorted(find_placeholders(resolved))
+    if placeholders:
+        print(
+            "looper: warning: unresolved template placeholders remain "
+            f"({', '.join(placeholders)}); fill them in before running this loop",
+            file=sys.stderr,
+        )
     out = args.out or source.with_name("loop.resolved.json")
     write_json(out, resolved)
     if args.render:

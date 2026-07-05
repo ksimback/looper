@@ -602,6 +602,74 @@ class LooperTests(unittest.TestCase):
             self.assertIn("covers-goal", prompt)
             self.assertIn("Execution Boundary", prompt)
 
+    def test_pattern_library_templates_compile_with_placeholder_warning(self) -> None:
+        loops_dir = ROOT / "templates" / "loops"
+        template_dirs = sorted(
+            path for path in loops_dir.iterdir() if path.is_dir()
+        )
+        self.assertTrue(template_dirs, "templates/loops/ has no template directories")
+        catalog = (loops_dir / "README.md").read_text(encoding="utf-8")
+        for template in template_dirs:
+            with self.subTest(template.name):
+                self.assertTrue(
+                    (template / "loop.yaml").is_file(),
+                    f"{template.name} is missing loop.yaml",
+                )
+                self.assertTrue(
+                    (template / "README.md").is_file(),
+                    f"{template.name} is missing README.md",
+                )
+                self.assertIn(
+                    f"[{template.name}]({template.name}/)",
+                    catalog,
+                    f"{template.name} is not listed in templates/loops/README.md",
+                )
+                with tempfile.TemporaryDirectory() as tmp:
+                    result = run_cmd(
+                        [
+                            sys.executable,
+                            str(LOOPER),
+                            "compile",
+                            str(template / "loop.yaml"),
+                            "--out",
+                            str(Path(tmp) / "loop.resolved.json"),
+                        ],
+                        ROOT,
+                    )
+                    self.assertEqual(result.returncode, 0, f"{template.name}: {result.stderr}")
+                    self.assertIn(
+                        "unresolved template placeholders remain",
+                        result.stderr,
+                        f"{template.name} should carry {{{{PLACEHOLDER}}}} tokens",
+                    )
+
+    def test_compile_placeholder_warning_absent_after_substitution(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            mutated = loop_yaml.replace(
+                "statement: Produce a checked LOOP.md.",
+                "statement: Produce a checked LOOP.md for {{PROJECT_NAME}}.",
+                1,
+            )
+            self.assertNotEqual(mutated, loop_yaml)
+            (work / "loop.yaml").write_text(mutated, encoding="utf-8")
+            with_token = run_cmd([sys.executable, str(LOOPER), "compile", "loop.yaml"], work)
+            self.assertEqual(with_token.returncode, 0, with_token.stderr)
+            self.assertIn("unresolved template placeholders remain", with_token.stderr)
+            self.assertIn("{{PROJECT_NAME}}", with_token.stderr)
+
+            (work / "loop.yaml").write_text(
+                mutated.replace("{{PROJECT_NAME}}", "demo-project"), encoding="utf-8"
+            )
+            filled = run_cmd([sys.executable, str(LOOPER), "compile", "loop.yaml"], work)
+            self.assertEqual(filled.returncode, 0, filled.stderr)
+            self.assertNotIn("unresolved template placeholders", filled.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
