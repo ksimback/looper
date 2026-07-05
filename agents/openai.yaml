@@ -1,3 +1,6 @@
+# OpenAI/Codex agent-interface stub for Looper. The Claude Code install path
+# does not read this file; it exists so Codex-style hosts can surface the
+# skill with the same invocation policy (explicit invocation only).
 interface:
   display_name: "Looper"
   short_description: "Design and scaffold agent loops"

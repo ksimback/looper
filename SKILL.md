@@ -11,7 +11,7 @@ description: >
   plus portable loop.yaml, loop.resolved.json, LOOP.md, and run-loop.py.
 disable-model-invocation: true
 argument-hint: "[target-dir]"
-allowed-tools: Write Bash
+allowed-tools: Read, Write, Bash
 ---
 
 # Looper
@@ -59,9 +59,9 @@ advanced external runner.
    - `run-loop.py`
    - `loop-workspace/`
    - `README.md`
-10. After writing `loop.yaml`, run:
-   `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
-   If `python3` is not available, try `python`.
+10. After writing `loop.yaml`, resolve the helper Python (see Helper Python
+   below) and run:
+   `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
 11. Ask whether the user wants to run the loop now in this session. If yes,
    follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
    the same file is the easy restart path and `run-loop.py` is available for
@@ -81,16 +81,31 @@ advanced external runner.
 - Copy `templates/run-loop.py` exactly unless the user explicitly asks to edit
   the external runner contract.
 
+## Helper Python
+
+The installer creates a private venv inside the skill directory. Its Python
+lives at `.venv/bin/python` on macOS/Linux and `.venv/Scripts/python.exe` on
+Windows. Shell state does not persist between commands, so prefix every helper
+invocation below with this resolution (works in POSIX shells and Git Bash on
+Windows):
+
+```bash
+LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/Scripts/python.exe"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON="$(command -v python3 || command -v python)"
+```
+
 ## Helper Scripts
 
+Each command below assumes the Helper Python resolution is prefixed in the
+same shell invocation:
+
 - Detect model CLIs:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py detect-models --write`
-- Register a custom CLI:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke <cmd> [args...]`
+  `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py detect-models --write`
+- Register a custom CLI (quote the whole invocation if it contains flags):
+  `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke "<cmd> [args...]"`
 - Compile and render:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+  `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
 - Render only the in-session handoff:
-  `LOOPER_PYTHON="${CLAUDE_SKILL_DIR}/.venv/bin/python"; [ -x "$LOOPER_PYTHON" ] || LOOPER_PYTHON=python3; "$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
+  `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
 
 ## Confirmation Flow Preview
 
@@ -134,7 +149,7 @@ Use this shape and customize labels:
 | all gates clean                |
 +--------------------------------+
 
-Stops: pass gates | max 12 iterations | no progress x2 | budget 30m, $5.0
+Stops: pass gates | max 12 iterations | no progress x2 | budget 30m, $5.0, 2000000 tokens
 ```
 
 ## Emit Checklist

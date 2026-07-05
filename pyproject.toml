@@ -1,6 +1,6 @@
 [project]
 name = "looper-skill"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Claude Code skill that scaffolds well-designed agent loops."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -45,7 +45,7 @@ flowchart TD
 
 **A loop design coach for Claude Code.** Looper is a skill that helps you design a *good* agent loop — a sharp goal, checkable verification, and a second model in the review seat — then lets you run it in the same session or save it as a portable spec. It is a design layer first: it writes files and hands the current session a clear execution prompt.
 
-Invoke it with `/looper`. It interviews you, critiques your design against built-in best-practice rubrics, lets you wire in a cross-model reviewer or judge (including non-Claude models), shows you the loop as a terminal-friendly ASCII flow preview, and writes out `RUN_IN_SESSION.md`, `loop.yaml`, a compiled `loop.resolved.json`, and a thin `run-loop.py` you own and edit.
+Invoke it with `/looper`. It interviews you, critiques your design against built-in best-practice rubrics, lets you wire in a cross-model reviewer or judge (including non-Claude models), shows you the loop as a terminal-friendly ASCII flow preview, and writes out `RUN_IN_SESSION.md`, `loop.yaml`, a compiled `loop.resolved.json`, a human-readable `LOOP.md`, a thin `run-loop.py` you own and edit, plus an empty `loop-workspace/` and a README for the loop.
 
 Maintainer: Kevin Simback · GitHub [@ksimback](https://github.com/ksimback) · X [@ksimback](https://x.com/ksimback)
 License: MIT
@@ -204,11 +204,43 @@ here, then install or update the global skill by cloning or copying the repo to
 If Claude Code says `Unknown command: /looper`, check both install locations:
 
 - The skill must exist at your real home directory, for example
-  `C:\Users\kevin\.claude\skills\looper` on Windows.
-- The slash command must exist at `C:\Users\kevin\.claude\commands\looper.md`
+  `C:\Users\<you>\.claude\skills\looper` on Windows.
+- The slash command must exist at `C:\Users\<you>\.claude\commands\looper.md`
   on Windows.
 - If you see a literal folder named `~` inside your project, your shell did not
   expand `~`; rerun the installer or manual PowerShell commands above.
+
+### What Looper writes on your machine
+
+Looper is transparent about its footprint. Outside of the loop folders you ask
+it to scaffold, it touches exactly four locations:
+
+- `~/.claude/skills/looper` — the skill itself (a git checkout).
+- `~/.claude/commands/looper.md` — the `/looper` slash command.
+- `~/.claude/skills/looper/.venv` — a private venv with PyYAML for the helper
+  compiler.
+- `~/.looper/models.json` — the model registry written by `detect-models` /
+  `register-model`. It stores invocation metadata only (command names and
+  argv arrays), never API keys or other credentials; auth stays in each CLI's
+  own config or keychain.
+
+### Uninstall
+
+Windows PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force "$env:USERPROFILE\.claude\skills\looper"
+Remove-Item -Force "$env:USERPROFILE\.claude\commands\looper.md"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.looper"  # optional: model registry
+```
+
+macOS/Linux:
+
+```bash
+rm -rf "$HOME/.claude/skills/looper"
+rm -f "$HOME/.claude/commands/looper.md"
+rm -rf "$HOME/.looper"  # optional: model registry
+```
 
 ---
 
