@@ -1,7 +1,7 @@
 ---
 description: Design and scaffold a Looper agent loop.
 argument-hint: [target-dir]
-allowed-tools: Read, Write, Bash, PowerShell
+allowed-tools: Read, Write, Bash
 ---
 
 # /looper
