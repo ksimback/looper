@@ -4,6 +4,15 @@ All notable changes to Looper are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the loop spec format is versioned
 separately via `version:` in `loop.yaml` (currently `1`).
 
+## 0.2.1 — 2026-07-05
+
+### Fixed
+- `install.ps1` crashed on Windows PowerShell 5.1 with "Argument expected for
+  the -c option": the Python probe passed an empty string (which PowerShell
+  drops for native executables) and its stderr redirect became a terminating
+  error under the script's `Stop` preference. The probe now runs `--version`
+  with stderr tolerated and validates the exit code (#14).
+
 ## 0.2.0 — 2026-07-05
 
 Remediation release from a full audit of the runner, compiler, installers,
