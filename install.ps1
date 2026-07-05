@@ -16,15 +16,25 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 
 # Validate by executing, not just locating: on Windows, "python" on PATH is
 # often the Microsoft Store alias stub, which exists but cannot run scripts.
+# The probe must tolerate stub stderr output without tripping the script's
+# ErrorActionPreference = "Stop".
 $Python = $null
 foreach ($Candidate in @("python", "py")) {
     $Command = Get-Command $Candidate -ErrorAction SilentlyContinue
-    if ($Command) {
-        & $Command.Source -c "" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            $Python = $Command
-            break
-        }
+    if (-not $Command) { continue }
+    $PreviousEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $null = & $Command.Source --version 2>&1
+        $Works = ($LASTEXITCODE -eq 0)
+    } catch {
+        $Works = $false
+    } finally {
+        $ErrorActionPreference = $PreviousEAP
+    }
+    if ($Works) {
+        $Python = $Command
+        break
     }
 }
 if (-not $Python) {
