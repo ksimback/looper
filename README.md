@@ -179,6 +179,28 @@ then offers to run the loop right there in the same Claude Code session.
 If you want a different folder name, pass it after `/looper`, for example
 `/looper client-onboarding-loop`.
 
+### Start from a pattern template
+
+Instead of a blank interview, start from a named, pre-designed loop:
+
+```text
+/looper my-review --template code-review
+```
+
+| Template | Use when |
+|----------|----------|
+| `security-scan` | Read-only sweep of a repo for secrets, PII, and vulnerabilities → triaged `SECURITY-FINDINGS.md`. |
+| `code-review` | Review a branch's diff against its base → typed, severity-rated `REVIEW.md` grounded in the diff. |
+| `bug-hunt` | Reproduce a reported bug, fix the root cause, prove it with before/after repro evidence. |
+| `docs-sync` | Find and fix doc/code drift → per-item `DRIFT-REPORT.md`; docs follow code, code untouched. |
+| `research-synthesis` | Synthesize collected sources into a cited `REPORT.md`; every claim traceable to a file. |
+
+Each template is a complete, compiler-validated `loop.yaml` with a handful of
+`{{PLACEHOLDER}}` slots; the wizard asks only for those, picks models from
+what's installed, and still runs its full critique, privacy, and preview flow
+before emitting. See [`templates/loops/`](templates/loops/) for the catalog
+and per-template docs — including how to add your own.
+
 ### Easy: run in the same session
 
 The default path is to let Looper continue in the same conversation. It follows

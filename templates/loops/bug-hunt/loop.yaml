@@ -1,0 +1,149 @@
+version: 1
+meta:
+  name: bug-hunt
+  description: >
+    Reproduce a reported bug, fix its root cause, and prove the fix: the
+    repro command must be observed failing before the change and passing
+    after it, with the full test suite still green.
+  author: looper-pattern-library
+  created: 2026-07-05
+
+goal:
+  statement: >
+    Fix the bug described in inputs/bug-report.md in the repository at
+    {{REPO_DIR}}. First reproduce it by running the repro command and
+    recording the failing output in the plan. Then find and fix the root
+    cause - not the symptom - and produce FIX-REPORT.md stating the root
+    cause, the change made (file:line), the before/after repro evidence, and
+    why the fix addresses the cause.
+  context_sources:
+    - file: ./inputs/bug-report.md
+    - cmd: "git -C {{REPO_DIR}} log --oneline -10"
+      timeout_sec: 60
+  definition_of_done: >
+    FIX-REPORT.md exists with root cause, fix location, and before/after
+    evidence; the repro command exits zero; the test suite passes; the diff
+    contains no changes unrelated to the fix; no TBD or placeholder text.
+  verification:
+    - id: repro-passes
+      type: programmatic
+      # The recorded repro. Must have been observed FAILING at plan time
+      # (plan gate checks that); passing here proves the fix. String form: the
+      # compiler shlex-splits it, so a multi-word command works as written.
+      check: "{{REPRO_CMD}}"
+      expect: exit_zero
+      timeout_sec: 300
+    - id: tests-pass
+      type: programmatic
+      check: "{{TEST_CMD}}"
+      expect: exit_zero
+      timeout_sec: 600
+    - id: report-schema
+      type: programmatic
+      # Structural check: root cause, fix location, before/after evidence; no TBDs.
+      check: ["python", "scripts/check-fix-report.py", "loop-workspace/FIX-REPORT.md"]
+      expect: exit_zero
+    - id: plan-repro-observed
+      type: judge
+      rubric: >
+        The fix-plan.md contains the verbatim output of the repro command
+        observed FAILING before any change was made, names the suspected
+        root-cause area (file or module), and states how the fix will be
+        verified. Verdict revise if the failure was never actually
+        reproduced or the plan jumps to a fix without evidence.
+    - id: root-cause-sound
+      type: judge
+      rubric: >
+        Judge FIX-REPORT.md against the actual diff of the fix. The stated
+        root cause must explain the failing behavior in the bug report, the
+        fix must plausibly remove that cause (not mask the symptom, not
+        special-case the repro input), and the before/after evidence must
+        show the same repro command failing then passing. Mark verdict
+        revise if the fix suppresses the failure without addressing the
+        cause, or if the diff includes changes unrelated to the fix.
+
+host:
+  cli: claude
+  model: default
+  invoke: ["claude", "-p"]
+  timeout_sec: 900
+
+council:
+  - id: judge-1
+    role: judge
+    cli: claude
+    model: default
+    invoke: ["claude", "-p"]
+    timeout_sec: 600
+    scope: [plan, delivery]
+    local: false
+
+gates:
+  plan_gate:
+    when: after_plan
+    members: [judge-1]
+    verdict_policy: revise_until_clean
+    verdict_source: judge-1
+    criteria: [plan-repro-observed]
+    max_revisions: 2
+  delivery_gate:
+    when: after_each_delivery
+    members: [judge-1]
+    verdict_policy: revise_until_clean
+    verdict_source: judge-1
+    criteria: [repro-passes, tests-pass, report-schema, root-cause-sound]
+    max_revisions: 3
+
+loop_control:
+  max_iterations: 10
+  budget:
+    usd: 5.0
+    tokens: 2000000
+    wall_clock_min: 45
+  no_progress:
+    max_stalled_iterations: 2
+    signals:
+      - same blocking issue repeats across iterations
+      - the repro command fails with an unchanged error after a revise verdict
+      - FIX-REPORT.md has no material change after a revise verdict
+    action: stop
+  human_checkpoints: []
+  stop_conditions:
+    - delivery_gate passes clean (all four criteria) on FIX-REPORT.md
+    - max_iterations reached
+    - same blocker repeats for 2 iterations
+    - any budget cap exceeded
+
+execution:
+  mode: in_session
+  # This loop EDITS the target repository - that is its job. Every write
+  # outside loop-workspace/ goes through side-effect approval.
+  isolation: current_workspace
+  side_effects:
+    requires_approval: true
+    duplicate_action_check: true
+    notes: >
+      The fix is applied to the working tree at the target repo. The loop
+      never commits or pushes; committing is the user's call after review.
+
+observability:
+  state_file: state.json
+  run_log: run-log.md
+  checkpoint_granularity: gate
+
+privacy:
+  egress:
+    - to: judge-1
+      sends: [plan, fix-report, fix-diff]
+      redact: [".env", ".env.*", "secrets/**", "**/*.key"]
+      consent: required
+
+workspace:
+  dir: ./loop-workspace
+  layout:
+    - fix-plan.md           # host plan incl. observed failing repro output
+    - "fix-draft-{n}.md"
+    - "review-{n}.md"       # judge notes per iteration
+    - FIX-REPORT.md         # final deliverable
+    - state.json
+    - run-log.md

@@ -1,0 +1,141 @@
+version: 1
+meta:
+  name: docs-sync
+  description: >
+    Detect drift between documentation and the code it describes, fix the
+    docs, and produce a drift report where every item is either corrected or
+    deferred with a reason. The code is never modified - docs follow code,
+    not the other way around.
+  author: looper-pattern-library
+  created: 2026-07-05
+
+goal:
+  statement: >
+    Compare the documentation under {{DOCS_DIR}} with the code under
+    {{SRC_DIR}} in the repository at {{REPO_DIR}}. Find every place the docs
+    say something the code no longer does - commands, flags, file paths,
+    defaults, API shapes, behavior claims - update the docs to match the
+    code, and produce DRIFT-REPORT.md listing every drift item with its doc
+    location, code location, what drifted, and its status (fixed or
+    deferred with a reason).
+  context_sources:
+    # Inventory of both trees; the host reads individual files from disk.
+    - cmd: "git -C {{REPO_DIR}} ls-files {{DOCS_DIR}} {{SRC_DIR}}"
+      timeout_sec: 60
+  definition_of_done: >
+    DRIFT-REPORT.md exists and every item carries doc location, code
+    location, drift description, and status; every fixed item's doc text now
+    matches the code; every deferred item has a concrete reason; no doc file
+    in scope was skipped without a note; no TBD or placeholder text.
+  verification:
+    - id: report-schema
+      type: programmatic
+      # Structural check: doc/code locations, drift description, status; no TBDs.
+      check: ["python", "scripts/check-drift-report.py", "loop-workspace/DRIFT-REPORT.md"]
+      expect: exit_zero
+    - id: plan-inventory
+      type: judge
+      rubric: >
+        The sync-plan.md lists every documentation file in scope (from the
+        captured inventory), names the code area each one describes, and
+        flags the doc surfaces most likely to drift (CLI help, install
+        steps, config references, examples). Verdict revise if a doc file
+        from the inventory is missing without a stated reason.
+    - id: drift-verified
+      type: judge
+      rubric: >
+        Judge DRIFT-REPORT.md against the current code. For each item marked
+        fixed, the updated doc text must now match what the code actually
+        does - verify against the named code location, not the report's own
+        claim. Nothing may be invented: every statement added to the docs
+        must be traceable to code. Mark verdict revise for any fixed item
+        that still mismatches, any invented behavior, or any deferred item
+        whose reason is vague.
+
+host:
+  cli: claude
+  model: default
+  invoke: ["claude", "-p"]
+  timeout_sec: 900
+
+council:
+  # Single local-family judge; docs and code stay on-machine by default.
+  - id: judge-1
+    role: judge
+    cli: claude
+    model: default
+    invoke: ["claude", "-p"]
+    timeout_sec: 600
+    scope: [plan, delivery]
+    local: false
+
+gates:
+  plan_gate:
+    when: after_plan
+    members: [judge-1]
+    verdict_policy: revise_until_clean
+    verdict_source: judge-1
+    criteria: [plan-inventory]
+    max_revisions: 2
+  delivery_gate:
+    when: after_each_delivery
+    members: [judge-1]
+    verdict_policy: revise_until_clean
+    verdict_source: judge-1
+    criteria: [report-schema, drift-verified]
+    max_revisions: 3
+
+loop_control:
+  max_iterations: 10
+  budget:
+    usd: 5.0
+    tokens: 2000000
+    wall_clock_min: 45
+  no_progress:
+    max_stalled_iterations: 2
+    signals:
+      - same blocking issue repeats across iterations
+      - DRIFT-REPORT.md has no material change after a revise verdict
+      - the same drift item stays unresolved
+    action: stop
+  human_checkpoints: []
+  stop_conditions:
+    - delivery_gate passes clean on DRIFT-REPORT.md
+    - max_iterations reached
+    - same blocker repeats for 2 iterations
+    - any budget cap exceeded
+
+execution:
+  mode: in_session
+  # This loop EDITS documentation files in the target repo - that is its
+  # job. It never modifies code. Every write outside loop-workspace/ goes
+  # through side-effect approval.
+  isolation: current_workspace
+  side_effects:
+    requires_approval: true
+    duplicate_action_check: true
+    notes: >
+      Doc edits are applied to the working tree at the target repo. The loop
+      never touches files under the source dir and never commits or pushes.
+
+observability:
+  state_file: state.json
+  run_log: run-log.md
+  checkpoint_granularity: gate
+
+privacy:
+  egress:
+    - to: judge-1
+      sends: [plan, drift-report, doc-diffs]
+      redact: [".env", ".env.*", "secrets/**", "**/*.key"]
+      consent: required
+
+workspace:
+  dir: ./loop-workspace
+  layout:
+    - sync-plan.md          # doc inventory + drift hot spots, gated by plan_gate
+    - "drift-draft-{n}.md"
+    - "review-{n}.md"       # judge notes per iteration
+    - DRIFT-REPORT.md       # final deliverable
+    - state.json
+    - run-log.md

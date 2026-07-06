@@ -1,6 +1,6 @@
 ---
 description: Design and scaffold a Looper agent loop.
-argument-hint: [target-dir]
+argument-hint: [target-dir] [--template <name>]
 allowed-tools: Read, Write, Bash
 ---
 
@@ -23,9 +23,17 @@ Find the Looper skill root before doing any loop-design work:
    exactly. Treat the located directory as `CLAUDE_SKILL_DIR` when running
    helper scripts.
 
-## Target Directory
+## Arguments
 
-- If `$ARGUMENTS` is empty, use `./looper-output`.
-- Otherwise, treat `$ARGUMENTS` as the target directory argument.
+Parse `$ARGUMENTS` as `[target-dir] [--template <name>]`, in any order:
+
+- If `--template` is present, take the next token as the template name and
+  follow the skill's Template Mode (the catalog lives at
+  `templates/loops/` inside the skill directory). `--template` with no
+  name means: show the catalog and ask.
+- Remove `--template <name>` from the arguments first; everything left is the
+  target directory — treat it as a single path even if it contains spaces
+  (e.g. `C:\My Loops\out`), and do not split it into multiple tokens. If
+  nothing is left, use `./looper-output`.
 
 Then continue with the Looper skill workflow.

@@ -1,0 +1,136 @@
+version: 1
+meta:
+  name: research-synthesis
+  description: >
+    Synthesize a set of source documents into a cited report that answers a
+    research question. Every substantive claim carries an inline citation to
+    a source file; the judge rejects uncited claims and anything a source
+    contradicts.
+  author: looper-pattern-library
+  created: 2026-07-05
+
+goal:
+  statement: >
+    Answer the research question "{{RESEARCH_QUESTION}}" using only the
+    source documents under inputs/sources/. Read every source, then produce
+    REPORT.md: a structured synthesis where every substantive claim carries
+    an inline citation in the form [source: inputs/sources/<file>], sources
+    that disagree are surfaced rather than averaged, and questions the
+    sources cannot answer are listed explicitly as gaps.
+  context_sources:
+    - file: ./inputs/sources/MANIFEST.md
+  definition_of_done: >
+    REPORT.md exists, answers the research question or states precisely why
+    it cannot, cites only files that exist under inputs/sources/, leaves no
+    substantive paragraph uncited, notes disagreements between sources, and
+    contains no TBD or placeholder text.
+  verification:
+    - id: citations-valid
+      type: programmatic
+      # Every cited path exists; every substantive paragraph is cited; no TBDs.
+      check: ["python", "scripts/check-citations.py", "loop-workspace/REPORT.md", "--sources", "inputs/sources"]
+      expect: exit_zero
+    - id: plan-covers-sources
+      type: judge
+      rubric: >
+        The synthesis-plan.md lists every file under inputs/sources/ with a
+        one-line note on what it contributes to the question, states the
+        intended report structure, and flags sources that look contradictory
+        or off-topic. Verdict revise if any source file is missing from the
+        plan without a stated reason.
+    - id: faithful-to-sources
+      type: judge
+      rubric: >
+        Spot-check REPORT.md against the cited sources. Every checked claim
+        must be supported by the file it cites - not by general knowledge,
+        not by another file. Disagreements between sources must appear as
+        disagreements, not be silently resolved. Mark verdict revise for any
+        claim its citation does not support, any material contradicted by a
+        source, or any answer to the question that goes beyond what the
+        sources establish without flagging it as a gap.
+
+host:
+  cli: claude
+  model: default
+  invoke: ["claude", "-p"]
+  timeout_sec: 900
+
+council:
+  # Single local-family judge; source material stays on-machine by default.
+  - id: judge-1
+    role: judge
+    cli: claude
+    model: default
+    invoke: ["claude", "-p"]
+    timeout_sec: 600
+    scope: [plan, delivery]
+    local: false
+
+gates:
+  plan_gate:
+    when: after_plan
+    members: [judge-1]
+    verdict_policy: revise_until_clean
+    verdict_source: judge-1
+    criteria: [plan-covers-sources]
+    max_revisions: 2
+  delivery_gate:
+    when: after_each_delivery
+    members: [judge-1]
+    verdict_policy: revise_until_clean
+    verdict_source: judge-1
+    criteria: [citations-valid, faithful-to-sources]
+    max_revisions: 3
+
+loop_control:
+  max_iterations: 8
+  budget:
+    usd: 5.0
+    tokens: 2000000
+    wall_clock_min: 45
+  no_progress:
+    max_stalled_iterations: 2
+    signals:
+      - same blocking issue repeats across iterations
+      - REPORT.md has no material change after a revise verdict
+      - the same uncited or unsupported claim persists
+    action: stop
+  human_checkpoints: []
+  stop_conditions:
+    - delivery_gate passes clean on REPORT.md
+    - max_iterations reached
+    - same blocker repeats for 2 iterations
+    - any budget cap exceeded
+
+execution:
+  mode: in_session
+  # Read-only toward inputs/; the loop writes only inside ./loop-workspace.
+  isolation: current_workspace
+  side_effects:
+    requires_approval: true
+    duplicate_action_check: true
+    notes: >
+      No side effects outside the loop directory. Sources are read in place
+      and never modified.
+
+observability:
+  state_file: state.json
+  run_log: run-log.md
+  checkpoint_granularity: gate
+
+privacy:
+  egress:
+    - to: judge-1
+      sends: [plan, report, source-excerpts]
+      redact: [".env", ".env.*", "secrets/**", "**/*.key"]
+      consent: required
+
+workspace:
+  dir: ./loop-workspace
+  layout:
+    - synthesis-plan.md     # per-source notes + report structure, gated by plan_gate
+    - "report-draft-{n}.md"
+    - "review-{n}.md"       # judge notes per iteration
+    - REPORT.md             # final deliverable
+    - state.json
+    - run-log.md
