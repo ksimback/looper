@@ -4,7 +4,29 @@ All notable changes to Looper are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the loop spec format is versioned
 separately via `version:` in `loop.yaml` (currently `1`).
 
-## Unreleased
+## 0.4.0 — 2026-07-07
+
+### Added — `looper lint`
+- `looper.py lint <loop.yaml>` — the design rubrics as a static checker, no
+  wizard required. Compiles the spec first (compile rejections exit 2), then
+  reports findings in two severities: **errors** for specs that will not
+  behave the way they read at runtime (`judge-criterion-unreachable` — judge
+  criteria on a `fixed_passes` gate, or under a human verdict source, are
+  never evaluated; `unscoped-egress` — a gate-referenced cross-vendor member
+  with no `privacy.egress` declaration; `egress-unknown-member` — an egress
+  entry naming nobody) and **warnings** for rubric coaching
+  (`all-vibe-verification`, `no-verification-criteria`, `same-family-judge`,
+  `delivery-gate-no-programmatic`, `non-local-member-without-egress`,
+  `egress-consent-pregranted`, `unreferenced-council-member`,
+  `unhonored-human-checkpoint`, `missing-max-revisions`,
+  `no-wall-clock-cap`, `no-stop-conditions`, `shell-string-check`,
+  `unresolved-placeholders`). Exit 1 on errors, or on any finding with
+  `--strict`; `--json` emits machine-readable findings for CI (exit 2
+  compile failures print to stderr, no JSON).
+- The wizard now runs `lint` after every compile and treats errors as
+  blockers, warnings as coaching to relay (SKILL.md step 10).
+- A test sweep asserts all five shipped templates and the example lint with
+  zero errors.
 
 ### Added — runner contract v1 + conformance suite
 - `RUNNER-CONTRACT.md` — the normative contract for third-party runners
@@ -62,26 +84,14 @@ separately via `version:` in `loop.yaml` (currently `1`).
   match the documented evaluator-model behavior (single-vendor evaluation,
   not literal self-grading).
 
-### Added — `looper lint`
-- `looper.py lint <loop.yaml>` — the design rubrics as a static checker, no
-  wizard required. Compiles the spec first (compile rejections exit 2), then
-  reports findings in two severities: **errors** for specs that will not
-  behave the way they read at runtime (`judge-criterion-unreachable` — judge
-  criteria on a `fixed_passes` gate are never evaluated; `unscoped-egress` —
-  a gate-referenced cross-vendor member with no `privacy.egress` declaration;
-  `egress-unknown-member` — an egress entry naming nobody) and **warnings**
-  for rubric coaching (`all-vibe-verification`, `no-verification-criteria`,
-  `same-family-judge`, `delivery-gate-no-programmatic`,
-  `non-local-member-without-egress`, `egress-consent-pregranted`,
-  `unreferenced-council-member`, `unhonored-human-checkpoint`,
-  `missing-max-revisions`, `no-wall-clock-cap`, `no-stop-conditions`,
-  `shell-string-check`, `unresolved-placeholders`). Exit 1 on errors, or on
-  any finding with `--strict`; `--json` emits machine-readable findings for
-  CI (exit 2 compile failures print to stderr, no JSON).
-- The wizard now runs `lint` after every compile and treats errors as
-  blockers, warnings as coaching to relay (SKILL.md step 10).
-- 10 new tests (37 total), including a sweep asserting all five shipped
-  templates and the example lint with zero errors.
+### Tests
+- Suite grew 27 → 49 across this release: lint checks (positive and
+  negative per check), redaction regressions (cmd-output scrub, host-prompt
+  scrub, leak attribution, unscrubbable surfacing, consent-shows-warning,
+  crash-leaves-terminal-state), and the conformance wrapper holding the
+  reference runner to the contract in CI. Every PR in this release
+  (#16–#19) received a pre-merge high-effort adversarial review; all
+  confirmed findings were fixed before merge.
 
 ## 0.3.0 — 2026-07-05
 
