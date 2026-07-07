@@ -214,9 +214,11 @@ coach against: all-vibe verification (no programmatic checks), judge criteria
 a runner would never evaluate, undeclared cross-vendor egress, a judge that
 shares the host's model family, missing caps, and unresolved `{{PLACEHOLDER}}`
 tokens. **Errors** mean the spec won't behave the way it reads (exit 1);
-**warnings** are design coaching (exit 0, or exit 1 with `--strict`). Add
-`--json` for tooling, and wire `lint --strict` into CI to gate loop specs in
-PRs the same way you lint code.
+**warnings** are design coaching (exit 0, or exit 1 with `--strict`). A spec
+that doesn't compile exits 2 with the compile error on stderr — in that case
+`--json` emits nothing, so CI wrappers should check the exit code before
+parsing. Add `--json` for tooling, and wire `lint --strict` into CI to gate
+loop specs in PRs the same way you lint code.
 
 ### Easy: run in the same session
 

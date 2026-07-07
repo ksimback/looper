@@ -746,13 +746,23 @@ class LintTests(unittest.TestCase):
             scoped = self._lint(work)
             self.assertEqual(scoped.returncode, 0, scoped.stdout + scoped.stderr)
             self.assertNotIn("unscoped-egress", scoped.stdout)
-            # Cross-vendor member with no human checkpoint is still coached.
-            self.assertIn("warning[cross-vendor-send-without-checkpoint]", scoped.stdout)
 
             self._mutate(work, "consent: required", "consent: granted")
             granted = self._lint(work)
             self.assertEqual(granted.returncode, 0, granted.stdout + granted.stderr)
             self.assertIn("warning[egress-consent-pregranted]", granted.stdout)
+
+            # A second entry for the same member that still requires consent
+            # means the runner will prompt after all; no pre-grant warning.
+            self._mutate(
+                work,
+                "      consent: granted",
+                "      consent: granted\n    - to: reviewer-1\n      sends: [reviews]\n"
+                "      redact: [\"inputs/**\"]\n      consent: required",
+            )
+            mixed = self._lint(work)
+            self.assertEqual(mixed.returncode, 0, mixed.stdout + mixed.stderr)
+            self.assertNotIn("egress-consent-pregranted", mixed.stdout)
 
     def test_non_local_same_family_member_without_egress_warns(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -765,6 +775,69 @@ class LintTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("warning[non-local-member-without-egress]", result.stdout)
             self.assertIn("warning[same-family-judge]", result.stdout)
+
+    def test_judge_criterion_under_human_verdict_source_is_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            self._mutate(work, "verdict_source: reviewer-1", "verdict_source: human")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("error[judge-criterion-unreachable]", result.stdout)
+            self.assertIn("verdict_source is human", result.stdout)
+
+    def test_unreferenced_cross_vendor_member_warns_instead_of_erroring(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml", judge_local=False)
+            # Detach the member from both gates: human verdicts, no members,
+            # and no judge criteria left anywhere.
+            self._mutate(work, "verdict_source: reviewer-1", "verdict_source: human")
+            self._mutate(work, "members: [reviewer-1]", "members: []")
+            self._mutate(work, "criteria: [covers-goal]", "criteria: []")
+            self._mutate(work, "criteria: [has-owner, covers-goal]", "criteria: [has-owner]")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("unscoped-egress", result.stdout)
+            self.assertIn("warning[unreferenced-council-member]", result.stdout)
+
+    def test_unhonored_human_checkpoint_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            self._mutate(
+                work,
+                "human_checkpoints: []",
+                "human_checkpoints: [after_plan, before cross-vendor send]",
+            )
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("warning[unhonored-human-checkpoint]", result.stdout)
+            # Only the unrecognized name is listed; 'after_plan' is honored.
+            self.assertIn("['before cross-vendor send']", result.stdout)
+
+    def test_empty_verification_gets_dedicated_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            lines = []
+            skipping = False
+            for line in (work / "loop.yaml").read_text(encoding="utf-8").splitlines():
+                if line.strip() == "verification:":
+                    lines.append(line.replace("verification:", "verification: []"))
+                    skipping = True
+                    continue
+                if skipping and (line.startswith("    ") or not line.strip()):
+                    continue
+                skipping = False
+                lines.append(line)
+            text = "\n".join(lines) + "\n"
+            text = text.replace("criteria: [covers-goal]", "criteria: []")
+            text = text.replace("criteria: [has-owner, covers-goal]", "criteria: []")
+            (work / "loop.yaml").write_text(text, encoding="utf-8")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("warning[no-verification-criteria]", result.stdout)
+            self.assertNotIn("all-vibe-verification", result.stdout)
 
     def test_egress_to_unknown_member_is_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

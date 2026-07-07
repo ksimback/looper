@@ -12,15 +12,16 @@ separately via `version:` in `loop.yaml` (currently `1`).
   reports findings in two severities: **errors** for specs that will not
   behave the way they read at runtime (`judge-criterion-unreachable` — judge
   criteria on a `fixed_passes` gate are never evaluated; `unscoped-egress` —
-  a cross-vendor member with no `privacy.egress` declaration;
+  a gate-referenced cross-vendor member with no `privacy.egress` declaration;
   `egress-unknown-member` — an egress entry naming nobody) and **warnings**
-  for rubric coaching (`all-vibe-verification`, `same-family-judge`,
-  `delivery-gate-no-programmatic`, `non-local-member-without-egress`,
-  `egress-consent-pregranted`, `cross-vendor-send-without-checkpoint`,
+  for rubric coaching (`all-vibe-verification`, `no-verification-criteria`,
+  `same-family-judge`, `delivery-gate-no-programmatic`,
+  `non-local-member-without-egress`, `egress-consent-pregranted`,
+  `unreferenced-council-member`, `unhonored-human-checkpoint`,
   `missing-max-revisions`, `no-wall-clock-cap`, `no-stop-conditions`,
   `shell-string-check`, `unresolved-placeholders`). Exit 1 on errors, or on
   any finding with `--strict`; `--json` emits machine-readable findings for
-  CI.
+  CI (exit 2 compile failures print to stderr, no JSON).
 - The wizard now runs `lint` after every compile and treats errors as
   blockers, warnings as coaching to relay (SKILL.md step 10).
 - 10 new tests (37 total), including a sweep asserting all five shipped

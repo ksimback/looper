@@ -42,6 +42,14 @@ SECRET_PATTERNS = [
 PLACEHOLDER_PATTERN = re.compile(r"\{\{[A-Za-z0-9_]+\}\}")
 
 
+def placeholder_warning_text(placeholders: list[str]) -> str:
+    # Shared by cmd_compile and lint so the two surfaces never drift.
+    return (
+        "unresolved template placeholders remain "
+        f"({', '.join(placeholders)}); fill them in before running this loop"
+    )
+
+
 def find_placeholders(value: Any) -> set[str]:
     found: set[str] = set()
     if isinstance(value, str):
@@ -549,7 +557,14 @@ def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[s
     programmatic_ids = {
         cid for cid, item in criteria.items() if item.get("type") == "programmatic"
     }
-    if not programmatic_ids:
+    if not criteria:
+        add(
+            "no-verification-criteria",
+            LINT_WARNING,
+            "goal.verification is empty; nothing checkable defines done - add "
+            "programmatic checks first, then judge rubrics (verification rubric)",
+        )
+    elif not programmatic_ids:
         add(
             "all-vibe-verification",
             LINT_WARNING,
@@ -558,26 +573,36 @@ def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[s
             "(verification rubric)",
         )
 
-    raw_gates = raw_spec.get("gates") or {}
     for gate_name in ("plan_gate", "delivery_gate"):
         gate = gates.get(gate_name, {})
         policy = gate.get("verdict_policy")
+        source = gate.get("verdict_source")
         gate_criteria = gate.get("criteria", []) or []
 
-        if policy == "fixed_passes":
-            dead = [
-                cid for cid in gate_criteria if criteria.get(cid, {}).get("type") == "judge"
-            ]
-            if dead:
-                add(
-                    "judge-criterion-unreachable",
-                    LINT_ERROR,
-                    f"{gate_name} uses fixed_passes but lists judge criteria "
-                    f"({', '.join(dead)}); runners only consult a judge under "
-                    "revise_until_clean, so these rubrics are never evaluated",
-                )
+        # Judge criteria are only ever evaluated when a judge member is the
+        # verdict source: under fixed_passes no verdict runs at all, and under
+        # revise_until_clean with a human source the runner asks for a bare
+        # pass/revise without ever surfacing the rubric.
+        dead = [
+            cid for cid in gate_criteria if criteria.get(cid, {}).get("type") == "judge"
+        ]
+        if dead and policy == "fixed_passes":
+            add(
+                "judge-criterion-unreachable",
+                LINT_ERROR,
+                f"{gate_name} uses fixed_passes but lists judge criteria "
+                f"({', '.join(dead)}); runners only consult a judge under "
+                "revise_until_clean, so these rubrics are never evaluated",
+            )
+        elif dead and policy == "revise_until_clean" and source == "human":
+            add(
+                "judge-criterion-unreachable",
+                LINT_ERROR,
+                f"{gate_name} lists judge criteria ({', '.join(dead)}) but its "
+                "verdict_source is human; the runner asks the human for a bare "
+                "pass/revise and never shows or evaluates these rubrics",
+            )
 
-        source = gate.get("verdict_source")
         if policy == "revise_until_clean" and source and source != "human":
             source_cli = members.get(source, {}).get("cli", "")
             if source_cli and source_cli == host_cli:
@@ -589,8 +614,9 @@ def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[s
                     "self-grading blind spots (council rubric)",
                 )
 
-        raw_gate = raw_gates.get(gate_name) or {}
-        if isinstance(raw_gate, dict) and "max_revisions" not in raw_gate:
+        # normalize_spec validates max_revisions but never writes a default
+        # back, so its absence is visible in the resolved gate too.
+        if "max_revisions" not in gate:
             add(
                 "missing-max-revisions",
                 LINT_WARNING,
@@ -608,7 +634,25 @@ def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[s
                 "defined; the shipped artifact is gated by judgment alone",
             )
 
+    # Only members a gate can actually invoke ever receive project content:
+    # run_reviewers iterates gate.members, run_judge only the verdict_source.
+    referenced: set = set()
+    for gate_name in ("plan_gate", "delivery_gate"):
+        gate = gates.get(gate_name, {})
+        referenced.update(gate.get("members", []) or [])
+        source = gate.get("verdict_source")
+        if source and source != "human":
+            referenced.add(source)
+
     for member_id, member in members.items():
+        if member_id not in referenced:
+            add(
+                "unreferenced-council-member",
+                LINT_WARNING,
+                f"council member {member_id!r} is not listed in any gate's members "
+                "or verdict_source; the runner will never invoke it (dead config)",
+            )
+            continue
         if member.get("local"):
             continue
         if member_id in egress_targets:
@@ -630,36 +674,51 @@ def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[s
                 "sends and redactions even for a same-vendor CLI",
             )
 
+    entries_by_target: dict[str, list[dict[str, Any]]] = {}
     for entry in egress:
         if not isinstance(entry, dict):
             continue
         target = entry.get("to")
+        entries_by_target.setdefault(str(target), []).append(entry)
         if target not in members:
             add(
                 "egress-unknown-member",
                 LINT_ERROR,
-                f"privacy.egress entry targets unknown council member {target!r}; its "
-                "redactions and consent will never apply to anyone",
+                f"privacy.egress entry targets unknown council member {target!r} "
+                "(renamed or mistyped id?); its sends/consent scoping binds to no "
+                "member, though its redact globs still extend context redaction",
             )
-        if entry.get("consent") == "granted":
+
+    # The runner skips the first-send consent prompt only when every egress
+    # entry for a non-local member pre-grants consent; local members never
+    # prompt at all.
+    for member_id, entries in entries_by_target.items():
+        member = members.get(member_id)
+        if member is None or member.get("local"):
+            continue
+        if all(entry.get("consent") == "granted" for entry in entries):
             add(
                 "egress-consent-pregranted",
                 LINT_WARNING,
-                f"privacy.egress to {target!r} pre-grants consent; the runner will "
-                "skip the first-send prompt for it",
+                f"every privacy.egress entry for {member_id!r} pre-grants consent; "
+                "the runner will skip the first-send prompt for it",
             )
 
-    has_cross_vendor = any(
-        not member.get("local") and member.get("cli") != host_cli
-        for member in members.values()
-    )
-    if has_cross_vendor and not (control.get("human_checkpoints") or []):
+    # run-loop.py recognizes only the literal checkpoint name "after_plan";
+    # anything else in human_checkpoints is honored solely by an in-session
+    # operator reading the prompt.
+    unhonored = [
+        name
+        for name in (control.get("human_checkpoints") or [])
+        if isinstance(name, str) and name != "after_plan"
+    ]
+    if unhonored:
         add(
-            "cross-vendor-send-without-checkpoint",
+            "unhonored-human-checkpoint",
             LINT_WARNING,
-            "a cross-vendor council member is configured but "
-            "loop_control.human_checkpoints is empty; add a checkpoint before the "
-            "first cross-vendor send (control rubric)",
+            f"human_checkpoints entries {unhonored!r} are not recognized by the "
+            "external runner (run-loop.py fires only 'after_plan'); they bind only "
+            "when an in-session operator runs the loop",
         )
 
     budget = control.get("budget", {}) or {}
@@ -695,12 +754,7 @@ def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[s
 
     placeholders = sorted(find_placeholders(resolved))
     if placeholders:
-        add(
-            "unresolved-placeholders",
-            LINT_WARNING,
-            f"unresolved template placeholders remain ({', '.join(placeholders)}); "
-            "fill them in before running this loop",
-        )
+        add("unresolved-placeholders", LINT_WARNING, placeholder_warning_text(placeholders))
 
     return findings
 
@@ -1042,8 +1096,7 @@ def cmd_compile(args: argparse.Namespace) -> int:
     placeholders = sorted(find_placeholders(resolved))
     if placeholders:
         print(
-            "looper: warning: unresolved template placeholders remain "
-            f"({', '.join(placeholders)}); fill them in before running this loop",
+            f"looper: warning: {placeholder_warning_text(placeholders)}",
             file=sys.stderr,
         )
     out = args.out or source.with_name("loop.resolved.json")
@@ -1063,6 +1116,10 @@ def cmd_compile(args: argparse.Namespace) -> int:
 def cmd_lint(args: argparse.Namespace) -> int:
     source = args.loop_yaml.resolve()
     raw = load_yaml(source)
+    # normalize_spec mutates its input in place (e.g. normalize_argv rewrites
+    # string `check:` values into argv lists), so lint checks that need the
+    # pre-normalization shape (shell-string-check) must see a deep copy taken
+    # before compiling.
     raw_copy = copy.deepcopy(raw)
     resolved = normalize_spec(raw, source)
     findings = lint_spec(raw_copy, resolved)
