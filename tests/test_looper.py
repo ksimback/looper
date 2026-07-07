@@ -1277,5 +1277,19 @@ class TemplateCheckerScriptTests(unittest.TestCase):
             self.assertEqual(inside.returncode, 0, inside.stderr)
 
 
+class ConformanceTests(unittest.TestCase):
+    def test_reference_runner_passes_conformance_suite(self) -> None:
+        result = run_cmd(
+            [
+                sys.executable,
+                str(ROOT / "conformance" / "check_runner.py"),
+                str(RUNNER_TEMPLATE),
+            ],
+            ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("FAIL", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

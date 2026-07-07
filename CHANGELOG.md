@@ -6,6 +6,20 @@ separately via `version:` in `loop.yaml` (currently `1`).
 
 ## Unreleased
 
+### Added — runner contract v1 + conformance suite
+- `RUNNER-CONTRACT.md` — the normative contract for third-party runners
+  executing `loop.resolved.json` (spec version 1): inputs, path safety,
+  model invocation, gate/verdict semantics, caps and termination,
+  fail-closed consent, two-layer redaction with surfacing, state/log
+  obligations, exit codes.
+- `conformance/check_runner.py` — nine-scenario conformance harness any
+  runner can be tested against (`python conformance/check_runner.py
+  path/to/runner`): happy path, judge-degrade, consent fail-closed, prompt
+  redaction, host-prompt scrub, context non-send, cmd-output scrub,
+  workspace escape refusal, revision cap. Self-contained deterministic
+  fixtures — no model CLIs needed. The reference `templates/run-loop.py`
+  is held to the suite in CI.
+
 ### Fixed — redaction covers every send (runner)
 - **Host prompts are now scrubbed.** The host was the one recipient whose
   prompts never passed through the content scrub: flagged-file content that
