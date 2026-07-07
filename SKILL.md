@@ -66,6 +66,11 @@ advanced external runner.
 10. After writing `loop.yaml`, resolve the helper Python (see Helper Python
    below) and run:
    `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+   Then run
+   `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py lint <target>/loop.yaml`
+   and relay the findings: fix any `error[...]` before continuing (the spec
+   would not behave as written), and surface `warning[...]` lines to the user
+   as design coaching they may accept or address.
 11. Ask whether the user wants to run the loop now in this session. If yes,
    follow `RUN_IN_SESSION.md` directly as the active task. If no, explain that
    the same file is the easy restart path and `run-loop.py` is available for
@@ -148,6 +153,8 @@ same shell invocation:
   `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py register-model <id> --invoke "<cmd> [args...]"`
 - Compile and render:
   `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py compile <target>/loop.yaml --out <target>/loop.resolved.json --render <target>/LOOP.md --session-prompt <target>/RUN_IN_SESSION.md`
+- Lint against the design-rubric anti-patterns (add `--strict` to fail on warnings, `--json` for tooling):
+  `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py lint <target>/loop.yaml`
 - Render only the in-session handoff:
   `"$LOOPER_PYTHON" ${CLAUDE_SKILL_DIR}/scripts/looper.py session-prompt <target>/loop.resolved.json --out <target>/RUN_IN_SESSION.md`
 
