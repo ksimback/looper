@@ -246,6 +246,22 @@ another terminal, or outside the LLM session:
 python3 ./looper-output/run-loop.py
 ```
 
+### Building your own runner
+
+`loop.resolved.json` is an interchange format, not just this repo's internal
+detail — a Looper spec can be executed by runners other than the bundled
+`run-loop.py` (other languages, other host platforms, other agent stacks).
+[`RUNNER-CONTRACT.md`](RUNNER-CONTRACT.md) is the normative contract: what a
+runner MUST do about gates, caps, consent, redaction, state, and exit codes.
+Prove a runner honors it with the conformance suite:
+
+```bash
+python conformance/check_runner.py path/to/your-runner
+```
+
+Ten scenarios, deterministic fixtures, no real model CLIs needed. The
+reference runner is held to the same suite in CI.
+
 For local development, this repository root is the skill root. Edit and test it
 here, then install or update the global skill by cloning or copying the repo to
 `$HOME/.claude/skills/looper` and copying `commands/looper.md` to

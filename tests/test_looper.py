@@ -1277,5 +1277,43 @@ class TemplateCheckerScriptTests(unittest.TestCase):
             self.assertEqual(inside.returncode, 0, inside.stderr)
 
 
+class CrashStateTests(unittest.TestCase):
+    def test_unexpected_crash_leaves_terminal_state_not_running(self) -> None:
+        # Contract section 5: a crash must not leave state claiming
+        # "running". A non-UTF-8 context file used to do exactly that.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_bytes(
+                "caf\xe9 notes\n".encode("latin-1")
+            )
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertNotEqual(result.returncode, 0)
+            state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
+            self.assertNotEqual(state["status"], "running", state)
+
+
+class ConformanceTests(unittest.TestCase):
+    def test_reference_runner_passes_conformance_suite(self) -> None:
+        result = run_cmd(
+            [
+                sys.executable,
+                str(ROOT / "conformance" / "check_runner.py"),
+                str(RUNNER_TEMPLATE),
+            ],
+            ROOT,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("FAIL", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
