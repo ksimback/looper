@@ -274,6 +274,263 @@ class LooperTests(unittest.TestCase):
             self.assertNotIn("SUPERSECRET-LOOPER-VALUE", judge_prompt)
             self.assertIn("[redacted:inputs/secret.txt]", judge_prompt)
 
+    def test_cmd_context_source_output_is_scrubbed_and_surfaced(self) -> None:
+        # Regression: cmd context-source output used to be inlined verbatim,
+        # so a command that printed a flagged file leaked it into context.md
+        # and every downstream prompt.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "inputs" / "secret.txt").write_text("SUPERSECRET-LOOPER-VALUE\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            python = Path(sys.executable).as_posix()
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "- file: ./inputs/process-notes.md",
+                "- file: ./inputs/process-notes.md\n"
+                f'    - cmd: ["{python}", "-c", "import pathlib; print(pathlib.Path(\'inputs/secret.txt\').read_text())"]',
+            )
+            loop_yaml = loop_yaml.replace(
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/secret.txt\"]\n      consent: required",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            context = (work / "loop-workspace" / "context.md").read_text(encoding="utf-8")
+            self.assertNotIn("SUPERSECRET-LOOPER-VALUE", context)
+            self.assertIn("[redacted:inputs/secret.txt]", context)
+            run_log = (work / "loop-workspace" / "run-log.md").read_text(encoding="utf-8")
+            self.assertIn("redaction_applied", run_log)
+            state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                any("context command output" in item for item in state.get("warnings", [])),
+                state.get("warnings"),
+            )
+
+    def test_artifact_leak_scrub_is_surfaced_in_state_and_log(self) -> None:
+        # Content-scrubbing an artifact send is no longer silent: the runner
+        # records which flagged files leaked into which prompt.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "inputs" / "secret.txt").write_text("SUPERSECRET-LOOPER-VALUE\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/**\"]\n      consent: required",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            workspace = work / "loop-workspace"
+            workspace.mkdir()
+            (workspace / "plan.md").write_text(
+                "Plan leaked SUPERSECRET-LOOPER-VALUE before redaction.\n", encoding="utf-8"
+            )
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            run_log = (workspace / "run-log.md").read_text(encoding="utf-8")
+            self.assertIn("redaction_applied", run_log)
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                any("prompt for reviewer-1" in item for item in state.get("warnings", [])),
+                state.get("warnings"),
+            )
+
+    def test_host_prompts_are_scrubbed_of_flagged_content(self) -> None:
+        # Regression: the host was the one recipient whose prompts were never
+        # scrubbed - an artifact leak went verbatim to the host CLI.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "inputs" / "secret.txt").write_text("SUPERSECRET-LOOPER-VALUE\n", encoding="utf-8")
+            capture_file = work / "host-stdin.txt"
+            spy_host = work / "spy_host.py"
+            spy_host.write_text(
+                "import pathlib\n"
+                "import sys\n"
+                "\n"
+                "prompt = sys.stdin.read()\n"
+                f"capture = pathlib.Path({str(capture_file)!r})\n"
+                "previous = capture.read_text(encoding='utf-8') if capture.exists() else ''\n"
+                "capture.write_text(previous + '\\n---CALL---\\n' + prompt, encoding='utf-8')\n"
+                "print('# Artifact')\n"
+                "print()\n"
+                "print('Owner: host')\n"
+                "print('No TBD')\n",
+                encoding="utf-8",
+            )
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            python = Path(sys.executable).as_posix()
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                f'invoke: ["{python}", "{(FIXTURES / "fake_host.py").as_posix()}"]',
+                f'invoke: ["{python}", "{spy_host.as_posix()}"]',
+            )
+            loop_yaml = loop_yaml.replace(
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/**\"]\n      consent: required",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            workspace = work / "loop-workspace"
+            workspace.mkdir()
+            (workspace / "plan.md").write_text(
+                "Plan leaked SUPERSECRET-LOOPER-VALUE before redaction.\nOwner: host\nNo TBD\n",
+                encoding="utf-8",
+            )
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            host_prompts = capture_file.read_text(encoding="utf-8")
+            self.assertNotIn("SUPERSECRET-LOOPER-VALUE", host_prompts)
+            self.assertIn("[redacted:inputs/secret.txt]", host_prompts)
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                any("prompt for host" in item for item in state.get("warnings", [])),
+                state.get("warnings"),
+            )
+
+    def test_leak_attribution_names_all_matching_files_and_dedupes_log(self) -> None:
+        # Two flagged files sharing the same content must both be named in
+        # the warning, and repeated identical scrubs log one event.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "inputs" / "secret-a.txt").write_text("SUPERSECRET-LOOPER-VALUE\n", encoding="utf-8")
+            (work / "inputs" / "secret-b.txt").write_text("SUPERSECRET-LOOPER-VALUE\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/secret-a.txt\", \"inputs/secret-b.txt\"]\n      consent: required",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            workspace = work / "loop-workspace"
+            workspace.mkdir()
+            (workspace / "plan.md").write_text(
+                "Plan leaked SUPERSECRET-LOOPER-VALUE before redaction.\nOwner: host\nNo TBD\n",
+                encoding="utf-8",
+            )
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            state = json.loads((workspace / "state.json").read_text(encoding="utf-8"))
+            warnings = [item for item in state.get("warnings", []) if "prompt for reviewer-1" in item]
+            self.assertTrue(warnings, state.get("warnings"))
+            self.assertIn("inputs/secret-a.txt", warnings[0])
+            self.assertIn("inputs/secret-b.txt", warnings[0])
+            run_log = (workspace / "run-log.md").read_text(encoding="utf-8")
+            reviewer_events = [
+                line for line in run_log.splitlines()
+                if "redaction_applied" in line and "prompt for reviewer-1" in line
+            ]
+            self.assertEqual(len(reviewer_events), 1, run_log)
+
+    def test_unscrubbable_flagged_file_is_surfaced_as_blind_spot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "inputs" / "huge.bin").write_text("A" * 1_100_000, encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml")
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/huge.bin\"]\n      consent: required",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            result = run_cmd([sys.executable, "run-loop.py"], work)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            state = json.loads((work / "loop-workspace" / "state.json").read_text(encoding="utf-8"))
+            self.assertTrue(
+                any("cannot be detected" in item and "huge.bin" in item for item in state.get("warnings", [])),
+                state.get("warnings"),
+            )
+            run_log = (work / "loop-workspace" / "run-log.md").read_text(encoding="utf-8")
+            self.assertIn("redaction_unscrubbable", run_log)
+
+    def test_consent_prompt_shows_leak_warning_before_asking(self) -> None:
+        # The scrub runs before the consent question, and the consent prompt
+        # displays the leak warning for that member.
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+            (work / "inputs" / "secret.txt").write_text("SUPERSECRET-LOOPER-VALUE\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml", judge_local=False)
+            shutil.copyfile(RUNNER_TEMPLATE, work / "run-loop.py")
+
+            loop_yaml = (work / "loop.yaml").read_text(encoding="utf-8")
+            loop_yaml = loop_yaml.replace(
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/**\"]\n      consent: required",
+            )
+            (work / "loop.yaml").write_text(loop_yaml, encoding="utf-8")
+
+            compiled = run_cmd(
+                [sys.executable, str(LOOPER), "compile", "loop.yaml", "--out", "loop.resolved.json"],
+                work,
+            )
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            workspace = work / "loop-workspace"
+            workspace.mkdir()
+            (workspace / "plan.md").write_text(
+                "Plan leaked SUPERSECRET-LOOPER-VALUE before redaction.\nOwner: host\nNo TBD\n",
+                encoding="utf-8",
+            )
+            result = run_cmd([sys.executable, "run-loop.py"], work, stdin="yes\n")
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            consent_block = result.stdout.split("Type 'yes' to consent")[0]
+            self.assertIn("Warning: flagged content", consent_block)
+
     def test_fixed_passes_reviewer_gate_completes_cleanly(self) -> None:
         # Regression: the synthetic "fixed_passes reviewer pass" marker used to
         # feed the no-progress detector and fail the run before its passes

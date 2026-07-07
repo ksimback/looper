@@ -218,6 +218,11 @@ class Runner:
         self.prior_elapsed = float(self.state.get("wall_clock_used_sec", 0) or 0)
         self.started = time.monotonic()
         self.stop_reason: str | None = None
+        # Per-run caches for the scrub layer: flagged-file contents are read
+        # once per glob set, surfaced events are logged once per destination.
+        self._flagged_cache: dict[tuple[str, ...], list[tuple[str, str]]] = {}
+        self._unscrubbable_reported: set[str] = set()
+        self._surfaced_events: set[tuple[str, tuple[str, ...]]] = set()
 
     def load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
@@ -327,22 +332,90 @@ class Runner:
                 if is_redacted(path, self.base_dir, globs):
                     yield path
 
-    def redact_prompt_for_member(self, member_id: str, prompt: str) -> str:
-        redacted = prompt
-        for path in self.iter_redaction_files(self.redactions_for(member_id)):
+    def flagged_file_contents(self, globs: list[str]) -> list[tuple[str, str]]:
+        """Read flagged files once per glob set; surface the unreadable ones.
+
+        A flagged file the scrub cannot read (too large, not UTF-8) cannot be
+        detected if its content leaks, so that blind spot is reported instead
+        of silently skipped.
+        """
+        key = tuple(sorted(globs))
+        if key in self._flagged_cache:
+            return self._flagged_cache[key]
+        contents: list[tuple[str, str]] = []
+        for path in self.iter_redaction_files(globs):
+            rel = path.relative_to(self.base_dir).as_posix()
+            reason = ""
             try:
-                secret_text = path.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            if not secret_text.strip() or len(secret_text) > 1_000_000:
-                continue
-            marker = f"[redacted:{path.relative_to(self.base_dir).as_posix()}]"
-            redacted = redacted.replace(secret_text, marker)
-            for line in secret_text.splitlines():
-                stripped = line.strip()
-                if len(stripped) >= 8:
-                    redacted = redacted.replace(stripped, marker)
-        return redacted
+                if path.stat().st_size > 1_000_000:
+                    reason = "larger than 1MB"
+                else:
+                    secret_text = path.read_text(encoding="utf-8")
+                    if secret_text.strip():
+                        contents.append((rel, secret_text))
+                    continue
+            except UnicodeDecodeError:
+                reason = "not valid UTF-8"
+            except OSError as exc:
+                reason = f"unreadable ({exc})"
+            if reason and rel not in self._unscrubbable_reported:
+                self._unscrubbable_reported.add(rel)
+                self.append_log("redaction_unscrubbable", source=rel, reason=reason)
+                self.add_state_warning(
+                    f"flagged file {rel} is {reason}; its content cannot be "
+                    "detected by the scrub layer if it leaks into artifacts"
+                )
+        self._flagged_cache[key] = contents
+        return contents
+
+    def scrub_flagged_content(self, text: str, globs: list[str]) -> tuple[str, list[str]]:
+        """Remove content originating from redaction-glob files.
+
+        The flagged files themselves are never read into prompts (path-based
+        non-send in gather_context); this second layer catches their content
+        when it re-surfaces elsewhere - a cmd context source that printed it,
+        or an artifact a model copied it into. Returns the scrubbed text and
+        the relative paths whose content was found. Best effort by design,
+        erring toward over-redaction: reformatted content or lines shorter
+        than 8 characters can survive, and a flagged-file line that
+        legitimately appears elsewhere is masked too.
+        """
+        original = text
+        hits: list[str] = []
+        for rel, secret_text in self.flagged_file_contents(globs):
+            marker = f"[redacted:{rel}]"
+            # Detect against the original text so a secret shared by two
+            # flagged files attributes both, not just the first replaced.
+            lines = [line.strip() for line in secret_text.splitlines() if len(line.strip()) >= 8]
+            if secret_text in original or any(line in original for line in lines):
+                hits.append(rel)
+            text = text.replace(secret_text, marker)
+            for line in lines:
+                text = text.replace(line, marker)
+        return text, hits
+
+    def add_state_warning(self, note: str) -> None:
+        warnings = list(self.state.get("warnings", []) or [])
+        if note not in warnings:
+            warnings.append(note)
+            self.save_state(warnings=warnings)
+
+    def surface_redaction(self, where: str, hits: list[str]) -> None:
+        if not hits:
+            return
+        event_key = (where, tuple(hits))
+        if event_key not in self._surfaced_events:
+            self._surfaced_events.add(event_key)
+            self.append_log("redaction_applied", where=where, sources=hits)
+        self.add_state_warning(
+            f"flagged content from {', '.join(hits)} appeared in {where}; "
+            "scrubbed before use"
+        )
+
+    def redact_prompt_for_member(self, member_id: str, prompt: str) -> str:
+        scrubbed, hits = self.scrub_flagged_content(prompt, self.redactions_for(member_id))
+        self.surface_redaction(f"prompt for {member_id}", hits)
+        return scrubbed
 
     def ensure_consent(self, member_id: str) -> None:
         member = self.member(member_id)
@@ -365,6 +438,9 @@ class Runner:
         print(f"Looper is about to send {', '.join(sends) or 'loop artifacts'} to {member_id}.")
         print(f"CLI: {member.get('cli')} / model: {member.get('model', 'default')}")
         print(f"Redactions: {', '.join(redactions)}")
+        for note in self.state.get("warnings", []) or []:
+            if f"prompt for {member_id}" in note:
+                print(f"Warning: {note}")
         if not matching:
             print("No privacy.egress entry covers this member; consent is required by default.")
         answer = ask("Type 'yes' to consent to this first send: ").strip().lower()
@@ -400,10 +476,15 @@ class Runner:
             elif "cmd" in source:
                 argv = ensure_argv(source["cmd"], f"context_sources[{index}].cmd")
                 result = run_argv(argv, cwd=self.base_dir, timeout_sec=int(source.get("timeout_sec", 60)))
-                chunks.append(
-                    f"## Context source {index}: {' '.join(argv)}\n"
-                    f"exit={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}\n"
+                # Command output can reproduce flagged-file content (cat, git
+                # log, env dumps); scrub it before it enters any prompt.
+                block = (
+                    f"exit={result.returncode}\nstdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}\n"
                 )
+                block, hits = self.scrub_flagged_content(block, redaction_globs)
+                self.surface_redaction(f"context command output ({' '.join(argv)})", hits)
+                chunks.append(f"## Context source {index}: {' '.join(argv)}\n{block}")
                 self.append_log("context_cmd", argv=argv, returncode=result.returncode)
         context = "\n".join(chunks).strip()
         write_text(self.workspace / "context.md", context or "No context sources configured.")
@@ -433,10 +514,18 @@ class Runner:
             )
         raise RunnerError(f"Unknown host phase: {phase}")
 
+    def call_host(self, prompt: str) -> str:
+        # The host is a send like any other: flagged content is scrubbed for
+        # every recipient, host included. Files a loop genuinely needs must
+        # not match redaction globs.
+        scrubbed, hits = self.scrub_flagged_content(prompt, self.all_redaction_globs())
+        self.surface_redaction("prompt for host", hits)
+        return call_model(spec_get(self.spec, "host"), scrubbed, self.base_dir)
+
     def run_host(self, phase: str, target: Path, artifact: str = "", review: str = "") -> None:
         self.enforce_wall_clock()
         self.append_log("host_start", phase=phase, target=target.name)
-        output = call_model(spec_get(self.spec, "host"), self.host_prompt(phase, artifact, review), self.base_dir)
+        output = self.call_host(self.host_prompt(phase, artifact, review))
         write_text(target, output)
         self.append_log("host_done", phase=phase, target=target.name)
 
@@ -498,15 +587,14 @@ class Runner:
         artifact_text: str,
         criteria: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        self.ensure_consent(member_id)
-        output = call_model(
-            self.member(member_id),
-            self.redact_prompt_for_member(
-                member_id,
-                self.judge_prompt(gate_name, artifact_label, artifact_text, criteria),
-            ),
-            self.base_dir,
+        # Scrub (and surface any leak) before asking for consent, so the
+        # consent decision is made with the leak warning already visible.
+        prompt = self.redact_prompt_for_member(
+            member_id,
+            self.judge_prompt(gate_name, artifact_label, artifact_text, criteria),
         )
+        self.ensure_consent(member_id)
+        output = call_model(self.member(member_id), prompt, self.base_dir)
         verdict = parse_judge_output(output)
         verdict["member"] = member_id
         self.append_log("judge_verdict", gate=gate_name, member=member_id, verdict=verdict.get("verdict"))
@@ -524,13 +612,13 @@ class Runner:
             member = self.member(member_id)
             if member.get("role") != "reviewer":
                 continue
-            self.ensure_consent(member_id)
             prompt = (
                 "You are a Looper reviewer. Return concise blocking and non-blocking notes. "
                 "Do not return a verdict.\n\n"
                 f"Gate: {gate_name}\nArtifact: {artifact_label}\n\n{artifact_text}\n"
             )
             prompt = self.redact_prompt_for_member(member_id, prompt)
+            self.ensure_consent(member_id)
             notes.append(f"## {member_id}\n\n{call_model(member, prompt, self.base_dir)}")
             self.append_log("reviewer_notes", gate=gate_name, member=member_id)
         return notes
@@ -631,11 +719,7 @@ class Runner:
                 self.append_log("stop", reason=f"{gate_name}_max_revisions_reached")
                 return False
 
-            revised = call_model(
-                spec_get(self.spec, "host"),
-                self.host_prompt("revise", artifact_text, review_text),
-                self.base_dir,
-            )
+            revised = self.call_host(self.host_prompt("revise", artifact_text, review_text))
             write_text(artifact_path, revised)
             revision += 1
             self.save_state(status=f"{gate_name}_revision_{revision}", last_review=str(review_path))
