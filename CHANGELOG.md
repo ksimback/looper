@@ -6,6 +6,16 @@ separately via `version:` in `loop.yaml` (currently `1`).
 
 ## Unreleased
 
+### Changed — positioning vs Claude Code's loop taxonomy
+- README's `/goal`-`/loop` comparison rewritten around the Claude Code
+  team's official loop taxonomy ("Getting started with loops"): turn-based /
+  goal-based / time-based / proactive, framed by what each hands off (the
+  check, the stop condition, the trigger, the whole prompt) and how Looper's
+  artifacts supply each hand-off. Adds `/schedule` and routines to the
+  comparison, a `looper lint` row, and corrects the `/goal` critique to
+  match the documented evaluator-model behavior (single-vendor evaluation,
+  not literal self-grading).
+
 ### Added — `looper lint`
 - `looper.py lint <loop.yaml>` — the design rubrics as a static checker, no
   wizard required. Compiles the spec first (compile rejections exit 2), then
