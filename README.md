@@ -304,7 +304,7 @@ rm -rf "$HOME/.looper"  # optional: model registry
 6. **Confirm** — review the loop as an ASCII flow preview.
 7. **Run or emit** — Looper writes `RUN_IN_SESSION.md`, `loop.yaml`, `loop.resolved.json`, `run-loop.py`, an empty workspace, and a README. The default is to offer to run the loop in the current session; the Python runner is there for external control.
 
-A council sends your project context to another model's CLI. Looper makes that explicit, applies default redactions, lets you scope what's sent, and asks for consent before the first cross-vendor send. Pick a local model (e.g. via `ollama`) to keep the council in-house.
+A council sends your project context to another model's CLI. Looper makes that explicit, lets you scope what's sent, and asks for consent before the first cross-vendor send. Redaction is two layers: files matching the redaction globs are **never read into prompts** (context sources show a `[redacted]` marker instead), and content from those files that re-surfaces anywhere else — a context command that printed it, an artifact the host copied it into — is scrubbed before any send, with the catch logged in `run-log.md` and surfaced in `state.json` warnings. The second layer is best-effort by design (reformatted content or very short values can survive), which is why the first layer refuses the read outright — and why a local model (e.g. via `ollama`) is the strongest option when redaction-sensitive paths exist.
 
 ## License
 

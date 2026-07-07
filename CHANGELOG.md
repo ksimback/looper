@@ -6,6 +6,20 @@ separately via `version:` in `loop.yaml` (currently `1`).
 
 ## Unreleased
 
+### Fixed — artifact-level redaction (runner)
+- `cmd` context-source output is now scrubbed against redaction-glob file
+  contents before it enters `context.md` or any prompt. Previously a
+  context command that printed a flagged file (`cat .env`-style, env dumps,
+  `git log`) leaked it verbatim to every downstream member.
+- Scrubbing is no longer silent: when flagged-file content is caught in a
+  prompt or command output, the runner appends a `redaction_applied` event
+  to `run-log.md` and a warning to `state.json` naming the source files and
+  destination, so a leak into loop artifacts is visible instead of quietly
+  masked.
+- README documents the two-layer posture honestly: path-based non-send for
+  flagged files, best-effort content scrub (with surfacing) for everything
+  derived; local models recommended when redaction-sensitive paths exist.
+
 ### Changed — positioning vs Claude Code's loop taxonomy
 - README's `/goal`-`/loop` comparison rewritten around the Claude Code
   team's official loop taxonomy ("Getting started with loops"): turn-based /

@@ -327,22 +327,54 @@ class Runner:
                 if is_redacted(path, self.base_dir, globs):
                     yield path
 
-    def redact_prompt_for_member(self, member_id: str, prompt: str) -> str:
-        redacted = prompt
-        for path in self.iter_redaction_files(self.redactions_for(member_id)):
+    def scrub_flagged_content(self, text: str, globs: list[str]) -> tuple[str, list[str]]:
+        """Remove content originating from redaction-glob files.
+
+        The flagged files themselves are never read into prompts (path-based
+        non-send in gather_context); this second layer catches their content
+        when it re-surfaces elsewhere - a cmd context source that printed it,
+        or an artifact the host copied it into. Returns the scrubbed text and
+        the relative paths whose content was found, so callers can surface
+        that a leak was caught. Best effort by design: reformatted content or
+        lines shorter than 8 characters can survive.
+        """
+        hits: list[str] = []
+        for path in self.iter_redaction_files(globs):
             try:
                 secret_text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
             if not secret_text.strip() or len(secret_text) > 1_000_000:
                 continue
-            marker = f"[redacted:{path.relative_to(self.base_dir).as_posix()}]"
-            redacted = redacted.replace(secret_text, marker)
+            rel = path.relative_to(self.base_dir).as_posix()
+            marker = f"[redacted:{rel}]"
+            scrubbed = text.replace(secret_text, marker)
             for line in secret_text.splitlines():
                 stripped = line.strip()
                 if len(stripped) >= 8:
-                    redacted = redacted.replace(stripped, marker)
-        return redacted
+                    scrubbed = scrubbed.replace(stripped, marker)
+            if scrubbed != text:
+                hits.append(rel)
+            text = scrubbed
+        return text, hits
+
+    def surface_redaction(self, where: str, hits: list[str]) -> None:
+        if not hits:
+            return
+        self.append_log("redaction_applied", where=where, sources=hits)
+        warnings = list(self.state.get("warnings", []) or [])
+        note = (
+            f"flagged content from {', '.join(hits)} appeared in {where}; "
+            "scrubbed before use"
+        )
+        if note not in warnings:
+            warnings.append(note)
+            self.save_state(warnings=warnings)
+
+    def redact_prompt_for_member(self, member_id: str, prompt: str) -> str:
+        scrubbed, hits = self.scrub_flagged_content(prompt, self.redactions_for(member_id))
+        self.surface_redaction(f"prompt for {member_id}", hits)
+        return scrubbed
 
     def ensure_consent(self, member_id: str) -> None:
         member = self.member(member_id)
@@ -400,9 +432,14 @@ class Runner:
             elif "cmd" in source:
                 argv = ensure_argv(source["cmd"], f"context_sources[{index}].cmd")
                 result = run_argv(argv, cwd=self.base_dir, timeout_sec=int(source.get("timeout_sec", 60)))
+                # Command output can reproduce flagged-file content (cat, git
+                # log, env dumps); scrub it before it enters any prompt.
+                stdout_text, stdout_hits = self.scrub_flagged_content(result.stdout, redaction_globs)
+                stderr_text, stderr_hits = self.scrub_flagged_content(result.stderr, redaction_globs)
+                self.surface_redaction(f"context command output ({' '.join(argv)})", sorted(set(stdout_hits + stderr_hits)))
                 chunks.append(
                     f"## Context source {index}: {' '.join(argv)}\n"
-                    f"exit={result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}\n"
+                    f"exit={result.returncode}\nstdout:\n{stdout_text}\nstderr:\n{stderr_text}\n"
                 )
                 self.append_log("context_cmd", argv=argv, returncode=result.returncode)
         context = "\n".join(chunks).strip()
