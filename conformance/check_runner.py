@@ -30,13 +30,16 @@ from typing import Any, Callable, Optional
 ROOT = Path(__file__).resolve().parents[1]
 COMPILER = ROOT / "scripts" / "looper.py"
 
+# Fake host: argv[1] captures every prompt received; optional argv[2] names a
+# "leak file" whose content the host copies into the plan it drafts - the
+# legitimate path by which flagged content enters an artifact.
 FAKE_HOST = '''
 import pathlib, sys
 prompt = sys.stdin.read()
-if len(sys.argv) > 1:
-    capture = pathlib.Path(sys.argv[1])
-    previous = capture.read_text(encoding="utf-8") if capture.exists() else ""
-    capture.write_text(previous + "\\n---CALL---\\n" + prompt, encoding="utf-8")
+capture = pathlib.Path(sys.argv[1])
+previous = capture.read_text(encoding="utf-8") if capture.exists() else ""
+capture.write_text(previous + "\\n---CALL---\\n" + prompt, encoding="utf-8")
+leak = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else None
 if "Revise the artifact" in prompt:
     print("Revised artifact")
     print()
@@ -46,6 +49,8 @@ elif "Draft plan.md" in prompt:
     print("# Plan")
     print()
     print("Owner: host")
+    if leak is not None and leak.exists():
+        print(leak.read_text(encoding="utf-8"))
     print("No TBD")
 else:
     print("# Delivery")
@@ -54,7 +59,9 @@ else:
     print("No TBD")
 '''
 
-# Verdict-emitting judge: revises `revise_count` times, then passes. Records
+# Verdict-emitting judge: revises `revise_count` times, then passes; a
+# negative revise_count means revise forever with a UNIQUE blocking issue per
+# call (so no-progress detectors cannot mask a missing revision cap). Records
 # every prompt it receives so scenarios can assert what crossed the boundary.
 FAKE_JUDGE = '''
 import json, pathlib, sys
@@ -71,11 +78,12 @@ if state_path.exists():
 count = int(state.get("count", 0))
 state["count"] = count + 1
 state_path.write_text(json.dumps(state), encoding="utf-8")
-verdict = (
-    {"verdict": "revise", "blocking_issues": ["Add an explicit owner."], "confidence": 0.9, "notes": ""}
-    if count < revise_count
-    else {"verdict": "pass", "blocking_issues": [], "confidence": 0.9, "notes": ""}
-)
+if revise_count < 0:
+    verdict = {"verdict": "revise", "blocking_issues": [f"Unique issue {count}."], "confidence": 0.9, "notes": ""}
+elif count < revise_count:
+    verdict = {"verdict": "revise", "blocking_issues": ["Add an explicit owner."], "confidence": 0.9, "notes": ""}
+else:
+    verdict = {"verdict": "pass", "blocking_issues": [], "confidence": 0.9, "notes": ""}
 print("```json")
 print(json.dumps(verdict))
 print("```")
@@ -126,6 +134,7 @@ class Harness:
         egress_yaml: str = "  egress: []",
         extra_context: str = "",
         max_revisions: int = 2,
+        host_leak: str = "",
     ) -> Path:
         """Write fixture scripts + loop.yaml into `work`, compile, return spec path."""
         fixtures = work / "fixtures"
@@ -140,6 +149,10 @@ class Harness:
         python = Path(self.python).as_posix()
         judge_state = (work / "judge-state.json").as_posix()
         capture = (work / "judge-capture.txt").as_posix()
+        host_invoke = [python, (fixtures / "fake_host.py").as_posix(), (work / "host-capture.txt").as_posix()]
+        if host_leak:
+            host_invoke.append(host_leak)
+        host_invoke_tail = ", ".join(f'"{item}"' for item in host_invoke)
         if judge_script == "fake_judge":
             judge_invoke = (
                 f'["{python}", "{(fixtures / "fake_judge.py").as_posix()}", '
@@ -175,7 +188,7 @@ class Harness:
             host:
               cli: fake-host
               model: fixture
-              invoke: ["{python}", "{(fixtures / 'fake_host.py').as_posix()}", "{(work / 'host-capture.txt').as_posix()}"]
+              invoke: [{host_invoke_tail}]
               timeout_sec: 30
 
             council:
@@ -279,16 +292,20 @@ def scenario_happy_path(h: Harness) -> Optional[str]:
 
 
 def scenario_judge_degrade(h: Harness) -> Optional[str]:
-    # Unparseable judge output must degrade to revise (never pass) and the
-    # run must end failed at the revision cap.
+    # Unparseable judge output must degrade to revise (never pass, never
+    # crash): revision rounds must actually happen (review artifacts per the
+    # contract's workspace layout) before the run ends failed at the cap.
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         spec = h.scaffold(work, judge_script="bad_judge")
         result = h.run(work, spec)
         state = h.state(work)
+        ws = work / "loop-workspace"
         return check_all(
             expect(result.returncode != 0, "expected non-zero exit for unparseable judge"),
             expect(state.get("status") not in {"passed", "running", None}, f"state.status={state.get('status')!r} must be terminal and not passed"),
+            expect((ws / "review-plan_gate-1.md").exists(), "no review artifact - runner crashed instead of degrading to revise"),
+            expect((ws / "review-plan_gate-2.md").exists(), "no second review round - runner did not revise after degraded verdict"),
         )
 
 
@@ -318,8 +335,18 @@ def scenario_consent_fail_closed(h: Harness) -> Optional[str]:
         )
 
 
+def read_captures(work: Path) -> tuple[str, str]:
+    judge = work / "judge-capture.txt"
+    host = work / "host-capture.txt"
+    return (
+        judge.read_text(encoding="utf-8") if judge.exists() else "",
+        host.read_text(encoding="utf-8") if host.exists() else "",
+    )
+
+
 def scenario_prompt_redaction(h: Harness) -> Optional[str]:
-    # Flagged-file content seeded into an artifact must not reach the judge.
+    # The host copies a flagged file's content into the plan it drafts (the
+    # legitimate leak path); the artifact send to the judge must be scrubbed.
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "inputs").mkdir()
@@ -331,23 +358,26 @@ def scenario_prompt_redaction(h: Harness) -> Optional[str]:
             '      redact: ["inputs/**"]\n'
             "      consent: required\n"
         )
-        spec = h.scaffold(work, egress_yaml=egress)
-        ws = work / "loop-workspace"
-        ws.mkdir()
-        (ws / "plan.md").write_text(f"Plan leaked {SECRET} before redaction.\nOwner: host\nNo TBD\n", encoding="utf-8")
+        # judge_revise_count=0: no revision round, so the leaked line stays in
+        # plan.md for the whole run (the fake host's revision output would
+        # otherwise drop it).
+        spec = h.scaffold(work, egress_yaml=egress, host_leak="inputs/secret.txt", judge_revise_count=0)
         result = h.run(work, spec)
-        capture = work / "judge-capture.txt"
-        captured = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        judge_cap, _ = read_captures(work)
+        plan = work / "loop-workspace" / "plan.md"
+        plan_text = plan.read_text(encoding="utf-8") if plan.exists() else ""
         return check_all(
             expect(result.returncode == 0, f"run failed: {result.stderr}"),
-            expect(captured, "judge capture missing - judge never called"),
-            expect(SECRET not in captured, "flagged content reached the judge"),
+            expect(SECRET in plan_text, "fixture broken: leak never entered the artifact"),
+            expect(judge_cap, "judge capture missing - judge never called"),
+            expect(SECRET not in judge_cap, "flagged content reached the judge"),
         )
 
 
 def scenario_host_prompt_scrub(h: Harness) -> Optional[str]:
-    # Flagged-file content seeded into an artifact must not reach the host
-    # either - the host is a send like any other (contract section 7).
+    # The host EMITS the secret into plan.md, but must never RECEIVE it back:
+    # the delivery/revise prompts embedding that artifact must be scrubbed
+    # (contract section 7 - the host is a send like any other).
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "inputs").mkdir()
@@ -359,22 +389,22 @@ def scenario_host_prompt_scrub(h: Harness) -> Optional[str]:
             '      redact: ["inputs/**"]\n'
             "      consent: required\n"
         )
-        spec = h.scaffold(work, egress_yaml=egress)
-        ws = work / "loop-workspace"
-        ws.mkdir()
-        (ws / "plan.md").write_text(f"Plan leaked {SECRET} before redaction.\nOwner: host\nNo TBD\n", encoding="utf-8")
+        spec = h.scaffold(work, egress_yaml=egress, host_leak="inputs/secret.txt", judge_revise_count=0)
         result = h.run(work, spec)
-        capture = work / "host-capture.txt"
-        captured = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        _, host_cap = read_captures(work)
+        plan = work / "loop-workspace" / "plan.md"
+        plan_text = plan.read_text(encoding="utf-8") if plan.exists() else ""
         return check_all(
             expect(result.returncode == 0, f"run failed: {result.stderr}"),
-            expect(captured, "host capture missing - host never called"),
-            expect(SECRET not in captured, "flagged content reached the host"),
+            expect(SECRET in plan_text, "fixture broken: leak never entered the artifact"),
+            expect(host_cap.count("---CALL---") >= 2, "host was not called for a delivery after the plan"),
+            expect(SECRET not in host_cap, "flagged content was sent back to the host"),
         )
 
 
 def scenario_context_non_send(h: Harness) -> Optional[str]:
-    # A context source naming a flagged file must not inline its content.
+    # A context source naming a flagged file must not inline its content into
+    # any prompt - the host's plan prompt is where context lands first.
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "inputs").mkdir()
@@ -388,16 +418,18 @@ def scenario_context_non_send(h: Harness) -> Optional[str]:
         )
         spec = h.scaffold(work, egress_yaml=egress, extra_context="    - file: ./inputs/secret.txt")
         result = h.run(work, spec)
-        capture = work / "judge-capture.txt"
-        captured = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        judge_cap, host_cap = read_captures(work)
         return check_all(
             expect(result.returncode == 0, f"run failed: {result.stderr}"),
-            expect(SECRET not in captured, "flagged context file content reached the judge"),
+            expect(host_cap, "host capture missing - host never called"),
+            expect(SECRET not in host_cap, "flagged context file content reached the host"),
+            expect(SECRET not in judge_cap, "flagged context file content reached the judge"),
         )
 
 
 def scenario_cmd_output_scrub(h: Harness) -> Optional[str]:
-    # A cmd context source that prints a flagged file must be scrubbed.
+    # A cmd context source that prints a flagged file must be scrubbed before
+    # its output reaches any prompt (host first, judge downstream).
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
         (work / "inputs").mkdir()
@@ -416,11 +448,29 @@ def scenario_cmd_output_scrub(h: Harness) -> Optional[str]:
         )
         spec = h.scaffold(work, egress_yaml=egress, extra_context=cmd_line)
         result = h.run(work, spec)
-        capture = work / "judge-capture.txt"
-        captured = capture.read_text(encoding="utf-8") if capture.exists() else ""
+        judge_cap, host_cap = read_captures(work)
         return check_all(
             expect(result.returncode == 0, f"run failed: {result.stderr}"),
-            expect(SECRET not in captured, "cmd output leaked flagged content to the judge"),
+            expect(host_cap, "host capture missing - host never called"),
+            expect(SECRET not in host_cap, "cmd output leaked flagged content to the host"),
+            expect(SECRET not in judge_cap, "cmd output leaked flagged content to the judge"),
+        )
+
+
+def scenario_default_redactions(h: Harness) -> Optional[str]:
+    # The default redaction globs (.env etc.) apply even when privacy.egress
+    # is empty - a runner that only honors explicit redact lists leaks here.
+    with tempfile.TemporaryDirectory() as tmp:
+        work = Path(tmp)
+        (work / ".env").write_text(f"API_KEY={SECRET}\n", encoding="utf-8")
+        spec = h.scaffold(work, host_leak=".env", judge_revise_count=0)
+        result = h.run(work, spec)
+        judge_cap, host_cap = read_captures(work)
+        return check_all(
+            expect(result.returncode == 0, f"run failed: {result.stderr}"),
+            expect(judge_cap, "judge capture missing - judge never called"),
+            expect(SECRET not in judge_cap, "default-glob (.env) content reached the judge"),
+            expect(SECRET not in host_cap, "default-glob (.env) content was sent back to the host"),
         )
 
 
@@ -441,16 +491,24 @@ def scenario_workspace_escape(h: Harness) -> Optional[str]:
 
 
 def scenario_revision_cap(h: Harness) -> Optional[str]:
-    # A judge that keeps revising must exhaust max_revisions and fail the
-    # run with a terminal state, not loop forever or pass.
+    # A judge that keeps revising - with a UNIQUE blocking issue every round,
+    # so a no-progress detector cannot mask a missing cap - must be stopped
+    # by max_revisions exactly: initial round + max_revisions rounds, then a
+    # terminal failure with no delivery ever drafted.
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp)
-        spec = h.scaffold(work, judge_revise_count=99, max_revisions=1)
+        spec = h.scaffold(work, judge_revise_count=-1, max_revisions=1)
         result = h.run(work, spec)
         state = h.state(work)
+        judge_state = work / "judge-state.json"
+        calls = 0
+        if judge_state.exists():
+            calls = int(json.loads(judge_state.read_text(encoding="utf-8")).get("count", 0))
         return check_all(
             expect(result.returncode != 0, "expected non-zero exit at revision cap"),
             expect(state.get("status") not in {"passed", "running", None}, f"state.status={state.get('status')!r} must be terminal and not passed"),
+            expect(calls == 2, f"judge called {calls} times; max_revisions=1 means exactly 2 rounds (initial + one revision)"),
+            expect(not (work / "loop-workspace" / "delivery-1.md").exists(), "delivery drafted despite the plan gate never passing"),
         )
 
 
@@ -460,6 +518,7 @@ SCENARIOS = [
     Scenario("consent-fail-closed", "non-local member requires recorded consent before first send", scenario_consent_fail_closed),
     Scenario("prompt-redaction", "flagged-file content in an artifact never reaches a member", scenario_prompt_redaction),
     Scenario("host-prompt-scrub", "flagged-file content in an artifact never reaches the host either", scenario_host_prompt_scrub),
+    Scenario("default-redactions", "the default redaction globs apply even with no egress entries", scenario_default_redactions),
     Scenario("context-non-send", "flagged context files are not inlined into prompts", scenario_context_non_send),
     Scenario("cmd-output-scrub", "cmd context-source output is scrubbed of flagged content", scenario_cmd_output_scrub),
     Scenario("workspace-escape", "workspace.dir outside the loop directory is refused", scenario_workspace_escape),

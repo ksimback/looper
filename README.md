@@ -259,7 +259,7 @@ Prove a runner honors it with the conformance suite:
 python conformance/check_runner.py path/to/your-runner
 ```
 
-Nine scenarios, deterministic fixtures, no real model CLIs needed. The
+Ten scenarios, deterministic fixtures, no real model CLIs needed. The
 reference runner is held to the same suite in CI.
 
 For local development, this repository root is the skill root. Edit and test it

@@ -12,13 +12,17 @@ separately via `version:` in `loop.yaml` (currently `1`).
   model invocation, gate/verdict semantics, caps and termination,
   fail-closed consent, two-layer redaction with surfacing, state/log
   obligations, exit codes.
-- `conformance/check_runner.py` — nine-scenario conformance harness any
+- `conformance/check_runner.py` — ten-scenario conformance harness any
   runner can be tested against (`python conformance/check_runner.py
-  path/to/runner`): happy path, judge-degrade, consent fail-closed, prompt
-  redaction, host-prompt scrub, context non-send, cmd-output scrub,
-  workspace escape refusal, revision cap. Self-contained deterministic
-  fixtures — no model CLIs needed. The reference `templates/run-loop.py`
-  is held to the suite in CI.
+  path/to/runner`): happy path, judge-degrade (verifying real revision
+  rounds), consent fail-closed, prompt redaction, host-prompt scrub,
+  default redaction globs, context non-send, cmd-output scrub, workspace
+  escape refusal, revision cap (stall-proof judge so a no-progress detector
+  cannot mask a missing cap). Self-contained deterministic fixtures — no
+  model CLIs needed. The reference `templates/run-loop.py` is held to the
+  suite in CI.
+- Runner: any crash — not just a `RunnerError` — now leaves `state.json` in
+  a terminal state instead of a phantom `running` (contract section 5).
 
 ### Fixed — redaction covers every send (runner)
 - **Host prompts are now scrubbed.** The host was the one recipient whose
