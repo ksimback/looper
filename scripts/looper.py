@@ -9,6 +9,7 @@ render LOOP.md. It must not invoke model CLIs to do loop work.
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as _dt
 import json
 import os
@@ -517,6 +518,193 @@ def normalize_spec(spec: dict[str, Any], source_path: Path) -> dict[str, Any]:
     return to_jsonable(resolved)
 
 
+# ---------------------------------------------------------------------------
+# Lint: the design rubrics as a static checker.
+#
+# Severity contract:
+#   error   - the spec will not behave the way it reads at runtime.
+#   warning - rubric coaching; the loop runs, but the design has a known trap.
+# Compile validation always runs first, so anything normalize_spec rejects
+# (reviewer verdict_source, missing caps enforced there, bad paths) surfaces
+# as `looper: error:` before lint findings are evaluated.
+
+LINT_ERROR = "error"
+LINT_WARNING = "warning"
+
+
+def lint_spec(raw_spec: dict[str, Any], resolved: dict[str, Any]) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+
+    def add(check: str, severity: str, message: str) -> None:
+        findings.append({"check": check, "severity": severity, "message": message})
+
+    criteria = resolved.get("criteria_by_id", {})
+    members = resolved.get("council_by_id", {})
+    host_cli = resolved.get("host", {}).get("cli", "")
+    gates = resolved.get("gates", {})
+    control = resolved.get("loop_control", {})
+    egress = resolved.get("privacy", {}).get("egress", [])
+    egress_targets = {entry.get("to") for entry in egress if isinstance(entry, dict)}
+
+    programmatic_ids = {
+        cid for cid, item in criteria.items() if item.get("type") == "programmatic"
+    }
+    if not programmatic_ids:
+        add(
+            "all-vibe-verification",
+            LINT_WARNING,
+            "every verification criterion is judge or human ('all-vibe'); add at least "
+            "one programmatic check so something objective can block the loop "
+            "(verification rubric)",
+        )
+
+    raw_gates = raw_spec.get("gates") or {}
+    for gate_name in ("plan_gate", "delivery_gate"):
+        gate = gates.get(gate_name, {})
+        policy = gate.get("verdict_policy")
+        gate_criteria = gate.get("criteria", []) or []
+
+        if policy == "fixed_passes":
+            dead = [
+                cid for cid in gate_criteria if criteria.get(cid, {}).get("type") == "judge"
+            ]
+            if dead:
+                add(
+                    "judge-criterion-unreachable",
+                    LINT_ERROR,
+                    f"{gate_name} uses fixed_passes but lists judge criteria "
+                    f"({', '.join(dead)}); runners only consult a judge under "
+                    "revise_until_clean, so these rubrics are never evaluated",
+                )
+
+        source = gate.get("verdict_source")
+        if policy == "revise_until_clean" and source and source != "human":
+            source_cli = members.get(source, {}).get("cli", "")
+            if source_cli and source_cli == host_cli:
+                add(
+                    "same-family-judge",
+                    LINT_WARNING,
+                    f"{gate_name} verdict_source {source!r} runs on the same CLI family "
+                    f"as the host ({host_cli}); a different model family closes "
+                    "self-grading blind spots (council rubric)",
+                )
+
+        raw_gate = raw_gates.get(gate_name) or {}
+        if isinstance(raw_gate, dict) and "max_revisions" not in raw_gate:
+            add(
+                "missing-max-revisions",
+                LINT_WARNING,
+                f"{gate_name} does not set max_revisions; make the revision cap "
+                "explicit (control rubric requires one per gate)",
+            )
+
+    if programmatic_ids:
+        delivery_criteria = gates.get("delivery_gate", {}).get("criteria", []) or []
+        if not any(cid in programmatic_ids for cid in delivery_criteria):
+            add(
+                "delivery-gate-no-programmatic",
+                LINT_WARNING,
+                "delivery_gate applies no programmatic criteria even though some are "
+                "defined; the shipped artifact is gated by judgment alone",
+            )
+
+    for member_id, member in members.items():
+        if member.get("local"):
+            continue
+        if member_id in egress_targets:
+            continue
+        if member.get("cli") != host_cli:
+            add(
+                "unscoped-egress",
+                LINT_ERROR,
+                f"council member {member_id!r} is non-local and cross-vendor "
+                f"({member.get('cli')}) but has no privacy.egress entry; declare what "
+                "it receives, the redaction globs, and consent (privacy contract)",
+            )
+        else:
+            add(
+                "non-local-member-without-egress",
+                LINT_WARNING,
+                f"council member {member_id!r} is non-local but has no privacy.egress "
+                "entry; project content leaves this machine undeclared - name the "
+                "sends and redactions even for a same-vendor CLI",
+            )
+
+    for entry in egress:
+        if not isinstance(entry, dict):
+            continue
+        target = entry.get("to")
+        if target not in members:
+            add(
+                "egress-unknown-member",
+                LINT_ERROR,
+                f"privacy.egress entry targets unknown council member {target!r}; its "
+                "redactions and consent will never apply to anyone",
+            )
+        if entry.get("consent") == "granted":
+            add(
+                "egress-consent-pregranted",
+                LINT_WARNING,
+                f"privacy.egress to {target!r} pre-grants consent; the runner will "
+                "skip the first-send prompt for it",
+            )
+
+    has_cross_vendor = any(
+        not member.get("local") and member.get("cli") != host_cli
+        for member in members.values()
+    )
+    if has_cross_vendor and not (control.get("human_checkpoints") or []):
+        add(
+            "cross-vendor-send-without-checkpoint",
+            LINT_WARNING,
+            "a cross-vendor council member is configured but "
+            "loop_control.human_checkpoints is empty; add a checkpoint before the "
+            "first cross-vendor send (control rubric)",
+        )
+
+    budget = control.get("budget", {}) or {}
+    if budget.get("wall_clock_min") is None:
+        add(
+            "no-wall-clock-cap",
+            LINT_WARNING,
+            "loop_control.budget.wall_clock_min is null; the runner will not enforce "
+            "any wall-clock cap",
+        )
+
+    if not (control.get("stop_conditions") or []):
+        add(
+            "no-stop-conditions",
+            LINT_WARNING,
+            "loop_control.stop_conditions is empty; state the success stop and the "
+            "failure/no-progress stops explicitly (control rubric)",
+        )
+
+    for item in (raw_spec.get("goal") or {}).get("verification") or []:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "programmatic"
+            and isinstance(item.get("check"), str)
+        ):
+            add(
+                "shell-string-check",
+                LINT_WARNING,
+                f"criterion {item.get('id')!r} writes its check as a shell string; "
+                "prefer an argv array (verification rubric) unless a placeholder must "
+                "be shlex-split after substitution",
+            )
+
+    placeholders = sorted(find_placeholders(resolved))
+    if placeholders:
+        add(
+            "unresolved-placeholders",
+            LINT_WARNING,
+            f"unresolved template placeholders remain ({', '.join(placeholders)}); "
+            "fill them in before running this loop",
+        )
+
+    return findings
+
+
 def clip(text: Any, width: int) -> str:
     value = str(text or "")
     return value if len(value) <= width else value[: width - 1] + "~"
@@ -872,6 +1060,37 @@ def cmd_compile(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_lint(args: argparse.Namespace) -> int:
+    source = args.loop_yaml.resolve()
+    raw = load_yaml(source)
+    raw_copy = copy.deepcopy(raw)
+    resolved = normalize_spec(raw, source)
+    findings = lint_spec(raw_copy, resolved)
+    errors = sum(1 for item in findings if item["severity"] == LINT_ERROR)
+    warnings = len(findings) - errors
+
+    if args.json:
+        print(
+            json.dumps(
+                {"findings": findings, "errors": errors, "warnings": warnings},
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
+        name = args.loop_yaml
+        for item in findings:
+            print(f"{name}: {item['severity']}[{item['check']}]: {item['message']}")
+        if findings:
+            print(f"looper lint: {errors} error(s), {warnings} warning(s)")
+        else:
+            print("looper lint: no findings")
+
+    if errors or (args.strict and findings):
+        return 1
+    return 0
+
+
 def cmd_session_prompt(args: argparse.Namespace) -> int:
     resolved = load_json(args.resolved_json)
     prompt = render_session_prompt(resolved)
@@ -908,6 +1127,23 @@ def build_parser() -> argparse.ArgumentParser:
     compile_cmd.add_argument("--render", type=Path)
     compile_cmd.add_argument("--session-prompt", type=Path)
     compile_cmd.set_defaults(func=cmd_compile)
+
+    lint = sub.add_parser(
+        "lint",
+        help="Check a loop.yaml against the design-rubric anti-patterns",
+        description=(
+            "Static anti-pattern checks over a compilable loop.yaml. "
+            "Errors mean the spec will not behave the way it reads at runtime; "
+            "warnings are rubric coaching. Exit 1 on errors (or on any finding "
+            "with --strict), 2 if the spec does not compile."
+        ),
+    )
+    lint.add_argument("loop_yaml", type=Path)
+    lint.add_argument("--json", action="store_true", help="Emit findings as JSON")
+    lint.add_argument(
+        "--strict", action="store_true", help="Treat warnings as failures (exit 1)"
+    )
+    lint.set_defaults(func=cmd_lint)
 
     session_prompt = sub.add_parser(
         "session-prompt", help="Render the in-session execution prompt from loop.resolved.json"

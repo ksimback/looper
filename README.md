@@ -201,6 +201,23 @@ what's installed, and still runs its full critique, privacy, and preview flow
 before emitting. See [`templates/loops/`](templates/loops/) for the catalog
 and per-template docs — including how to add your own.
 
+### Lint any loop.yaml
+
+The design rubrics also exist as a static checker — no wizard, no interview:
+
+```bash
+python scripts/looper.py lint path/to/loop.yaml
+```
+
+`lint` compiles the spec, then checks it for the anti-patterns the rubrics
+coach against: all-vibe verification (no programmatic checks), judge criteria
+a runner would never evaluate, undeclared cross-vendor egress, a judge that
+shares the host's model family, missing caps, and unresolved `{{PLACEHOLDER}}`
+tokens. **Errors** mean the spec won't behave the way it reads (exit 1);
+**warnings** are design coaching (exit 0, or exit 1 with `--strict`). Add
+`--json` for tooling, and wire `lint --strict` into CI to gate loop specs in
+PRs the same way you lint code.
+
 ### Easy: run in the same session
 
 The default path is to let Looper continue in the same conversation. It follows

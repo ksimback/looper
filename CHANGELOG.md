@@ -4,6 +4,28 @@ All notable changes to Looper are documented here. Versions follow
 [Semantic Versioning](https://semver.org/); the loop spec format is versioned
 separately via `version:` in `loop.yaml` (currently `1`).
 
+## Unreleased
+
+### Added — `looper lint`
+- `looper.py lint <loop.yaml>` — the design rubrics as a static checker, no
+  wizard required. Compiles the spec first (compile rejections exit 2), then
+  reports findings in two severities: **errors** for specs that will not
+  behave the way they read at runtime (`judge-criterion-unreachable` — judge
+  criteria on a `fixed_passes` gate are never evaluated; `unscoped-egress` —
+  a cross-vendor member with no `privacy.egress` declaration;
+  `egress-unknown-member` — an egress entry naming nobody) and **warnings**
+  for rubric coaching (`all-vibe-verification`, `same-family-judge`,
+  `delivery-gate-no-programmatic`, `non-local-member-without-egress`,
+  `egress-consent-pregranted`, `cross-vendor-send-without-checkpoint`,
+  `missing-max-revisions`, `no-wall-clock-cap`, `no-stop-conditions`,
+  `shell-string-check`, `unresolved-placeholders`). Exit 1 on errors, or on
+  any finding with `--strict`; `--json` emits machine-readable findings for
+  CI.
+- The wizard now runs `lint` after every compile and treats errors as
+  blockers, warnings as coaching to relay (SKILL.md step 10).
+- 10 new tests (37 total), including a sweep asserting all five shipped
+  templates and the example lint with zero errors.
+
 ## 0.3.0 — 2026-07-05
 
 ### Added — loop pattern library

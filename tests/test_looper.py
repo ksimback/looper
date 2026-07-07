@@ -671,6 +671,160 @@ class LooperTests(unittest.TestCase):
             self.assertNotIn("unresolved template placeholders", filled.stderr)
 
 
+class LintTests(unittest.TestCase):
+    def _setup_work(self, tmp: str) -> Path:
+        work = Path(tmp)
+        (work / "inputs").mkdir()
+        (work / "inputs" / "process-notes.md").write_text("Need a useful loop.\n", encoding="utf-8")
+        write_loop_yaml(work / "loop.yaml")
+        return work
+
+    def _lint(self, work: Path, *flags: str) -> subprocess.CompletedProcess[str]:
+        return run_cmd([sys.executable, str(LOOPER), "lint", "loop.yaml", *flags], work)
+
+    def _mutate(self, work: Path, old: str, new: str, count: int = -1) -> None:
+        text = (work / "loop.yaml").read_text(encoding="utf-8")
+        mutated = text.replace(old, new) if count < 0 else text.replace(old, new, count)
+        self.assertNotEqual(mutated, text, f"mutation did not apply: {old!r}")
+        (work / "loop.yaml").write_text(mutated, encoding="utf-8")
+
+    def test_clean_fixture_loop_has_no_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("no findings", result.stdout)
+
+    def test_all_vibe_verification_warns_and_fails_strict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            lines = []
+            for line in (work / "loop.yaml").read_text(encoding="utf-8").splitlines():
+                if "check: [" in line or "expect: exit_zero" in line:
+                    continue
+                if line.strip() == "type: programmatic":
+                    lines.append(line.replace("programmatic", "judge"))
+                    lines.append(line.replace("type: programmatic", "rubric: The artifact names an owner."))
+                    continue
+                lines.append(line)
+            (work / "loop.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("warning[all-vibe-verification]", result.stdout)
+
+            strict = self._lint(work, "--strict")
+            self.assertEqual(strict.returncode, 1, strict.stdout + strict.stderr)
+
+    def test_judge_criterion_under_fixed_passes_is_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            self._mutate(work, "verdict_policy: revise_until_clean", "verdict_policy: fixed_passes")
+            self._mutate(work, "verdict_source: reviewer-1\n", "")
+            self._mutate(work, "        criteria:", "    criteria:")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("error[judge-criterion-unreachable]", result.stdout)
+
+    def test_cross_vendor_member_without_egress_is_error_and_scoped_egress_clears_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml", judge_local=False)
+
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("error[unscoped-egress]", result.stdout)
+
+            self._mutate(
+                work,
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: reviewer-1\n      sends: [plan, deliveries]\n"
+                "      redact: [\"inputs/**\"]\n      consent: required",
+            )
+            scoped = self._lint(work)
+            self.assertEqual(scoped.returncode, 0, scoped.stdout + scoped.stderr)
+            self.assertNotIn("unscoped-egress", scoped.stdout)
+            # Cross-vendor member with no human checkpoint is still coached.
+            self.assertIn("warning[cross-vendor-send-without-checkpoint]", scoped.stdout)
+
+            self._mutate(work, "consent: required", "consent: granted")
+            granted = self._lint(work)
+            self.assertEqual(granted.returncode, 0, granted.stdout + granted.stderr)
+            self.assertIn("warning[egress-consent-pregranted]", granted.stdout)
+
+    def test_non_local_same_family_member_without_egress_warns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml", judge_local=False)
+            self._mutate(work, "cli: fake-judge", "cli: fake-host")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("warning[non-local-member-without-egress]", result.stdout)
+            self.assertIn("warning[same-family-judge]", result.stdout)
+
+    def test_egress_to_unknown_member_is_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            self._mutate(
+                work,
+                "privacy:\n  egress: []",
+                "privacy:\n  egress:\n    - to: ghost\n      sends: [plan]\n      consent: required",
+            )
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("error[egress-unknown-member]", result.stdout)
+
+    def test_coaching_warnings_for_caps_and_gating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            self._mutate(work, "wall_clock_min: 5", "wall_clock_min: null")
+            self._mutate(work, "    max_revisions: 2\n", "", 1)
+            self._mutate(work, "criteria: [has-owner, covers-goal]", "criteria: [covers-goal]")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("warning[no-wall-clock-cap]", result.stdout)
+            self.assertIn("warning[missing-max-revisions]", result.stdout)
+            self.assertIn("warning[delivery-gate-no-programmatic]", result.stdout)
+
+    def test_json_output_matches_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "inputs").mkdir()
+            (work / "inputs" / "process-notes.md").write_text("Notes.\n", encoding="utf-8")
+            write_loop_yaml(work / "loop.yaml", judge_local=False)
+            result = self._lint(work, "--json")
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["errors"], 1)
+            self.assertEqual(
+                payload["errors"] + payload["warnings"], len(payload["findings"])
+            )
+            checks = {item["check"] for item in payload["findings"]}
+            self.assertIn("unscoped-egress", checks)
+
+    def test_lint_rejects_uncompilable_spec_with_exit_2(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = self._setup_work(tmp)
+            self._mutate(work, "dir: ./loop-workspace", "dir: ../escape")
+            result = self._lint(work)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("looper: error:", result.stderr)
+
+    def test_shipped_templates_and_example_lint_without_errors(self) -> None:
+        specs = sorted((ROOT / "templates" / "loops").glob("*/loop.yaml"))
+        specs.append(ROOT / "examples" / "ai-workflow-mapping" / "loop.yaml")
+        self.assertGreaterEqual(len(specs), 6)
+        for spec in specs:
+            with self.subTest(spec.parent.name):
+                result = run_cmd([sys.executable, str(LOOPER), "lint", str(spec)], ROOT)
+                self.assertEqual(result.returncode, 0, f"{spec}: {result.stdout}{result.stderr}")
+                self.assertNotIn("error[", result.stdout, spec)
+
+
 LOOPS = ROOT / "templates" / "loops"
 
 
