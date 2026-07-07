@@ -52,9 +52,16 @@ License: MIT
 
 ---
 
-## Why not just use `/goal` or `/loop`?
+## Where Looper fits among Claude Code's loops
 
-Claude Code already ships two pieces that look loop-shaped. They're useful — and they operate at a different layer than Looper. The short version: **`/goal` and `/loop` *run* a loop; Looper helps you *design* one that's worth running, then gives the current session or an external runner a clear spec to follow.**
+The Claude Code team's own taxonomy ("Getting started with loops") sorts loops by what you hand off: **turn-based** loops hand off the *check* (verification skills), **goal-based** loops hand off the *stop condition* (`/goal`), **time-based** loops hand off the *trigger* (`/loop`, `/schedule`), and **proactive** loops hand off the *whole prompt* (routines composing all of the above). Every one of those primitives *runs* a loop. Looper is the layer in front of them: it helps you **design** a loop that's worth running, then emits a spec any of the four can execute.
+
+Concretely, what each loop type asks you to hand off is exactly what Looper coaches and hardens:
+
+- **Turn-based** — the check you'd encode as a verification skill is Looper's typed `verification` block: programmatic first, judge rubric second, human signoff last.
+- **Goal-based** — `/goal`'s stop condition is Looper's `definition_of_done` plus gates; the difference is *who judges it* (a model family you chose, against a typed rubric) and what surrounds it (revision caps, no-progress stalls, budget guards).
+- **Time-based** — `/loop` and `/schedule` re-fire whatever you give them; give them a loop that already passed compile and lint, and each firing follows `RUN_IN_SESSION.md` or `run-loop.py` instead of an ad-hoc prompt.
+- **Proactive** — a routine is only as good as the prompt it repeats; the compiled `loop.resolved.json` is a versionable, reviewable artifact you can hand to a routine and audit later.
 
 ### What `/goal` actually does
 
@@ -63,33 +70,35 @@ Claude Code already ships two pieces that look loop-shaped. They're useful — a
 That's genuinely useful for persistence. But three things are missing for serious work:
 
 - **No coaching.** `/goal` takes whatever goal you type, however vague. It won't tell you the goal is unfalsifiable or that "done" was never defined. Garbage goal in, confidently-wrong loop out.
-- **Self-evaluation by one model.** The goal condition is judged by the *same model doing the work.* That's precisely the blind spot a review council exists to close — the model grading its own homework. In practice this self-check skews unreliable (sometimes too lenient, sometimes too conservative).
+- **Single-vendor evaluation.** The stop condition is checked by an evaluator model, but it's the same vendor in the same pipeline — not a model family you chose for blind-spot coverage, and there's no typed rubric behind the verdict. A review council exists precisely to put a *different* set of eyes, with explicit criteria, on the work.
 - **No structure to inspect or reuse.** The goal lives in the session, not as a portable, versionable artifact. There's no typed verification, no explicit gates, no second model.
 
-### What `/loop` actually does
+### What `/loop` and `/schedule` actually do
 
-`/loop` is a **scheduler.** You give it an interval and a task; it turns that into a cron job, registers it, and re-fires the prompt or skill on that cadence — polling CI, watching a deploy, monitoring a background job. (Omit the interval and it self-paces.)
+`/loop` is a **scheduler.** You give it an interval and a task; it re-fires the prompt or skill on that cadence — polling CI, watching a deploy, monitoring a background job. (Omit the interval and it self-paces.) `/schedule` is the same hand-off moved to the cloud: a routine that keeps firing when your machine is off.
 
-It's the right tool for "run this thing every five minutes until I say stop." It is **not** a loop designer: it doesn't help you decide *what* runs, define success criteria, or bring in a reviewer. It schedules; it doesn't critique.
+They're the right tool for "run this thing every five minutes until I say stop." Neither is a loop designer: they don't help you decide *what* runs, define success criteria, or bring in a reviewer. They schedule; they don't critique.
 
-### Where Looper fits
+### Side by side
 
-Looper is the **design layer that sits in front of both.** It produces a well-specified loop — coached goal, typed verification, a cross-model gate — then gives you a default in-session handoff prompt plus a portable spec. The same design can be run immediately in the conversation, driven by `/goal` for persistence, fired on a schedule by `/loop`, or run later with Python. Looper doesn't replace them; it gives them something good to run.
+Looper is the **design layer that sits in front of all of them.** It produces a well-specified loop — coached goal, typed verification, a cross-model gate — then gives you a default in-session handoff prompt plus a portable spec. The same design can be run immediately in the conversation, driven by `/goal` for persistence, fired on a schedule by `/loop` or `/schedule`, or run later with Python. Looper doesn't replace them; it gives them something good to run.
 
-| | `/goal` | `/loop` | **Looper** |
+| | `/goal` | `/loop` / `/schedule` | **Looper** |
 | :-- | :-- | :-- | :-- |
-| Layer | execution (in-session) | execution (scheduling) | **design (pre-flight)** |
+| Layer | execution (in-session) | execution (scheduling, local / cloud) | **design (pre-flight)** |
+| You hand off | the stop condition | the trigger | **the design, checked before anything runs** |
 | Coaches your goal | no | no | **yes** |
 | Typed, checkable verification | no | no | **yes (programmatic / judge / human)** |
-| Reviewer model | same model (self-check) | none | **a different model, by default** |
+| Reviewer model | built-in evaluator, same vendor | none | **a different model family, by default** |
 | Explicit review gates | implicit | none | **plan gate + delivery gate** |
 | Termination guards | goal-condition only | interval / until | **iteration + revision + no-progress + budget caps** |
-| Portable, versionable artifact | no | the cron job | **`loop.yaml` + resolved spec** |
+| Portable, versionable artifact | no | the cron job / routine | **`loop.yaml` + resolved spec** |
+| Static design checks | no | no | **`looper lint` (CI-friendly)** |
 | Runs the loop | **yes** | **yes** | **yes, by handing the current session a runnable prompt; Python runner optional** |
 
-The honest summary: if you already know your loop is well-designed and you just need it to persist or to fire on a schedule, `/goal` and `/loop` are the right reach. Looper exists for the part those don't touch — making sure the loop is *worth* persisting before you hand it off, and making sure something other than the author is checking the work.
+The honest summary: if you already know your loop is well-designed and you just need it to persist or to fire on a schedule, `/goal`, `/loop`, and `/schedule` are the right reach. Looper exists for the part those don't touch — making sure the loop is *worth* persisting before you hand it off, and making sure something other than the author is checking the work.
 
-> Sources for the `/goal` and `/loop` behavior described above: Claude Code skills and commands documentation at code.claude.com/docs. Behavior and version gates change frequently; verify against upstream before shipping.
+> Sources for the behavior described above: the Claude Code team's "Getting started with loops" guide and the skills/commands documentation at code.claude.com/docs. Behavior and version gates change frequently; verify against upstream before shipping.
 
 ---
 
