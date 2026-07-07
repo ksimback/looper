@@ -6,19 +6,33 @@ separately via `version:` in `loop.yaml` (currently `1`).
 
 ## Unreleased
 
-### Fixed — artifact-level redaction (runner)
-- `cmd` context-source output is now scrubbed against redaction-glob file
-  contents before it enters `context.md` or any prompt. Previously a
-  context command that printed a flagged file (`cat .env`-style, env dumps,
-  `git log`) leaked it verbatim to every downstream member.
-- Scrubbing is no longer silent: when flagged-file content is caught in a
-  prompt or command output, the runner appends a `redaction_applied` event
-  to `run-log.md` and a warning to `state.json` naming the source files and
-  destination, so a leak into loop artifacts is visible instead of quietly
-  masked.
-- README documents the two-layer posture honestly: path-based non-send for
-  flagged files, best-effort content scrub (with surfacing) for everything
-  derived; local models recommended when redaction-sensitive paths exist.
+### Fixed — redaction covers every send (runner)
+- **Host prompts are now scrubbed.** The host was the one recipient whose
+  prompts never passed through the content scrub: flagged-file content that
+  leaked into an artifact went verbatim to the host CLI on every
+  delivery/revise prompt (council prompts were already best-effort
+  scrubbed). Every send — host included — now uses the same scrub.
+- **`cmd` context-source output is scrubbed** before it enters `context.md`
+  or any prompt. Previously a context command that printed a flagged file
+  (`cat .env`-style, env dumps, `git log`) flowed verbatim into
+  `context.md` and from there onward.
+- **Scrubbing is no longer silent.** A caught leak appends a
+  `redaction_applied` event to `run-log.md` (deduplicated per destination)
+  and a `state.json` warning naming every source file whose content
+  matched — not just the first — and the destination. The scrub now runs
+  *before* the first-send consent question, and the consent prompt displays
+  any leak warnings for that member, so consent is decided with the leak
+  signal visible.
+- **Unscrubbable flagged files are surfaced.** A redaction-glob file the
+  scrub cannot read (over 1MB, not valid UTF-8) is reported as a blind spot
+  in `run-log.md` and `state.json` instead of being silently skipped.
+- Flagged-file contents are read once per run (not re-walked per prompt),
+  and stdout/stderr of a context command are scrubbed as one block.
+- README documents the posture honestly: path-based non-send is the first
+  layer; the content scrub is best-effort and errs toward over-redaction (a
+  flagged-file line that legitimately appears elsewhere is masked too);
+  flagged means flagged for every recipient, host included; local models
+  recommended when redaction-sensitive paths exist.
 
 ### Changed — positioning vs Claude Code's loop taxonomy
 - README's `/goal`-`/loop` comparison rewritten around the Claude Code
