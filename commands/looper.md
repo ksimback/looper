@@ -1,6 +1,6 @@
 ---
 description: Design and scaffold a Looper agent loop.
-argument-hint: [target-dir] [--template <name>]
+argument-hint: "[target-dir] [--template <name>]"
 allowed-tools: Read, Write, Bash
 ---
 
